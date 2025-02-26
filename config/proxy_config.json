@@ -1,0 +1,21 @@
+{
+  "listen_ports": [
+    {
+      "port": 8080,
+      "backends": [
+        {
+          "host": "127.0.0.1",
+          "port": 8000,
+          "weight": 1
+        },
+        {
+          "host": "127.0.0.1",
+          "port": 8001,
+          "weight": 2
+        }
+      ]
+    }
+  ],
+  "thread_pool_size": 4,
+  "load_balancing": "weighted_round_robin"
+}
