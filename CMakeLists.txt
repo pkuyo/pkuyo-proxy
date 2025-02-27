@@ -17,7 +17,10 @@ add_executable(proxy src/main.cpp
         src/http_handler.cpp
         src/worker.cpp
         src/master.cpp
-        src/logger.cpp)
+        src/logger.cpp
+        src/def.cpp
+        include/process.h
+        src/process.cpp)
 
 
 

@@ -14,8 +14,6 @@
 
 #include "init_listener.h"
 
-#include <thread>
-
 #include "worker.h"
 #include "master.h"
 
@@ -56,28 +54,35 @@ void start_listener(ListenerConfig & config) {
 
     init_mmap(ctx);
 
-
     for (int current_count = 0;current_count < config.process_count;current_count++) {
         int fd[2];
         pipe(fd);
-        pid_t pid = fork();
+        pid_t pid = fork_with_cleanup();
         if (pid == 0) {
 
-            Worker worker(ctx);
+            Worker worker(std::move(ctx));
             worker.worker_loop();
             return;
         }
     }
 
-    Master master(ctx);
-    master.master_loop();
+    auto master = std::make_unique<Master>(std::move(ctx));
+
+    if (master->master_loop()) {
+        //启动子进程
+        auto ctx = std::move(master->ctx);
+        master.reset();
+
+        Worker worker(std::move(ctx));
+        worker.worker_loop();
+    }
 }
 
 
 
 void fork_listeners(ProxyConfig & config) {
     for (int i = 0; i < config.listener_count; i++) {
-        pid_t pid = fork();
+        pid_t pid = fork_with_cleanup();
         if (pid == 0) {
             // 子进程运行监听逻辑
             start_listener(config.listeners[i]);

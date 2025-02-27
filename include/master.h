@@ -4,14 +4,17 @@
 
 #ifndef MASTER_H
 #define MASTER_H
-#include <def.h>
 
-class Master {
-    ProcContext ctx;
+#include "def.h"
+#include "process.h"
+
+class Master : Process {
 public:
-    explicit Master(ProcContext& _ctx);
-    ~Master();
-
-    void master_loop();
+    explicit Master(ProcContext&& _ctx);
+    ~Master() {
+        instance = nullptr;
+    }
+    bool master_loop();
+    Master* instance;
 };
 #endif //MASTER_H

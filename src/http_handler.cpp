@@ -8,11 +8,42 @@
 #include "http_handler.h"
 
 #include <string>
-#include <iostream>
 #include <unistd.h>
 #include <sys/epoll.h>
+#include <sstream>
 
 #include "spdlog/spdlog.h"
+
+static const char* backend_error_response = R"(<html>
+<head><title>502 Bad Gateway</title></head>
+<body>
+<center><h1>502 Bad Gateway</h1></center>
+<hr><center>pkuyo-proxy</center>
+</body>
+</html>)";
+
+std::string get_status_msg(int errorCode) {
+    switch (errorCode) {
+        case 500: return "Internal Server Error";
+        case 502: return "Bad Gateway";
+        default: return "Unknown Status";
+    }
+}
+std::string gen_error_response(const char* content, int errorCode) {
+    std::stringstream response;
+
+    response << "HTTP/1.1 " << errorCode << " " << get_status_msg(errorCode) << "\r\n";
+
+    response << "Content-Type: text/html\r\n";
+    response << "Content-Length: " << strlen(content) << "\r\n";
+    response << "Connection: close\r\n";
+
+    response << "\r\n";
+    response << content;
+
+    return response.str();
+}
+
 
 
 bool read_raw_buff(ConnectionContext & ctx) {
@@ -95,11 +126,11 @@ void parse_chunked_data(ConnectionContext& ctx) {
             current_context.data.chunk_size -= bytes_to_read;
 
             if (current_context.data.chunk_size == 0) {
-                // 当前分块读取完毕，检查分块结束符
+
                 if (ctx.raw_buffer.size() >= 2 && ctx.raw_buffer.substr(0, 2) == "\r\n") {
-                    ctx.raw_buffer.erase(0, 2); // 移除分块结束符
+                    ctx.raw_buffer.erase(0, 2);
                 }
-                ctx.state = ConnectionContext::READ_CHUNK_SIZE; // 准备读取下一个分块
+                ctx.state = ConnectionContext::READ_CHUNK_SIZE;
             }
         }
     }
@@ -111,7 +142,6 @@ void parse_http_context(ConnectionContext & ctx) {
         if (ctx.state == ConnectionContext::READ_HEADERS) {
             size_t header_end = ctx.raw_buffer.find("\r\n\r\n");
 
-            bool ignored = false;
 
             if (header_end != std::string::npos) {
                 // 解析到完整的头部
@@ -123,7 +153,6 @@ void parse_http_context(ConnectionContext & ctx) {
                 else {
                     request.data.content_remaining = get_content_length(request.buffer);
                     if ( request.data.content_remaining == -1) {
-                        ignored = true;
                         ctx.raw_buffer.erase(0, header_end + 4);
                         spdlog::error("get_content_length failed, pid:{}, from:{}, to:{}", getpid(),
                             ctx.fd,ctx.to_fd);
@@ -136,7 +165,6 @@ void parse_http_context(ConnectionContext & ctx) {
                     }
                 }
                 ctx.queue.push(std::move(request));
-
                 ctx.raw_buffer.erase(0, header_end + 4); // 移除已解析的头部
 
 
@@ -165,7 +193,17 @@ void parse_http_context(ConnectionContext & ctx) {
     }
 }
 
-bool send_http_buffer(ConnectionContext & ctx, epoll_event & ev, int epoll_id) {
+bool send_http_buffer(ConnectionContext & ctx, ConnectionContext & rev_ctx, epoll_event & ev, int epoll_id) {
+    if (ctx.to_fd == -1) {
+        while (!ctx.queue.empty()) {
+            ctx.queue.pop();
+            //TODO:优化性能
+            rev_ctx.queue.push(HttpContext{.is_completed = true,.buffer = gen_error_response(backend_error_response,502)});
+        }
+        if (!rev_ctx.is_sending)
+            return send_http_buffer(rev_ctx, ctx, ev, epoll_id);
+        return false;
+    }
     bool result, need_listen = false;
     while (true) {
         if (ctx.queue.empty() || !ctx.queue.front().is_completed) {
@@ -176,7 +214,6 @@ bool send_http_buffer(ConnectionContext & ctx, epoll_event & ev, int epoll_id) {
         auto & current_context = ctx.queue.front();
 
         ssize_t byte_send = write(ctx.to_fd,current_context.buffer.data(),current_context.buffer.size());
-
         if (byte_send == -1) {
             if  (errno == EAGAIN || errno == EWOULDBLOCK) {
                 result = false;
@@ -202,11 +239,13 @@ bool send_http_buffer(ConnectionContext & ctx, epoll_event & ev, int epoll_id) {
     if (!result) {
         if (need_listen && !ctx.is_sending) {
             ev.events = EPOLLIN | EPOLLET | EPOLLOUT;
+            ev.data.fd = ctx.to_fd;
             epoll_ctl(epoll_id, EPOLL_CTL_MOD, ctx.to_fd, &ev);
             ctx.is_sending = true;
         }
         else if (!need_listen && ctx.is_sending) {
-            ev.events = EPOLLIN | EPOLLET ;
+            ev.events = EPOLLIN | EPOLLET;
+            ev.data.fd = ctx.to_fd;
             epoll_ctl(epoll_id, EPOLL_CTL_MOD, ctx.to_fd, &ev);
             ctx.is_sending = false;
         }
@@ -214,12 +253,14 @@ bool send_http_buffer(ConnectionContext & ctx, epoll_event & ev, int epoll_id) {
     return result;
 }
 
-bool handle_http_buffer(ConnectionContext & ctx, epoll_event & ev, int epoll_id) {
+bool handle_http_buffer(ConnectionContext & ctx) {
+    //后端服务器连接失败情况
+    if (ctx.fd == -1)
+        return false;
+
     if (read_raw_buff(ctx))
         return true;
     parse_http_context(ctx);
-    if (!ctx.is_sending)
-        return send_http_buffer(ctx,ev,epoll_id);
     return false;
 }
 

@@ -10,11 +10,9 @@
 #include "http_handler.h"
 
 
-Worker::Worker(const ProcContext& _ctx)
-: ctx(_ctx) {
-}
-Worker::~Worker() {
-    ctx.Clear();
+
+Worker::Worker(ProcContext&& _ctx)
+    : Process(std::move(_ctx)), events{} {
 }
 
 struct BackServer {
@@ -52,41 +50,24 @@ void Worker::disconnect(int fd) {
     if (client_to_backend.contains(fd)) {
         auto backend_fd = client_to_backend[fd]->backend_fd;
         close_connection(epoll_fd, fd);
-        close_connection(epoll_fd, backend_fd);
         client_to_backend.erase(fd);
-        backend_to_client.erase(backend_fd);
+
+        if (backend_fd != -1) {
+            close_connection(epoll_fd, backend_fd);
+            backend_to_client.erase(backend_fd);
+        }
     } else if (backend_to_client.contains(fd)) {
         int client_fd = backend_to_client[fd]->client_fd;
         close_connection(epoll_fd, fd);
-        close_connection(epoll_fd, client_fd);
         backend_to_client.erase(fd);
+
+        close_connection(epoll_fd, client_fd);
         client_to_backend.erase(client_fd);
     }
-   log_info("Connection closed: %d", fd);
+   log_debug("Connection closed: %d", fd);
 }
 
 
-void Worker::log_error(const char * message, bool has_error) const {
-    if (has_error) {
-        spdlog::error("{}, error:{}, server:{}:{}.",
-            message,
-            strerror(errno),
-        ctx.config.server_name,
-        ctx.config.port);
-    }
-    else {
-        spdlog::error("{}, server:{}:{}.",
-            message,
-        ctx.config.server_name,
-        ctx.config.port);
-    }
-}
-void Worker::log_info(const char * message) const {
-    spdlog::info("{}, server:{}:{}.",
-        message,
-    ctx.config.server_name,
-    ctx.config.port);
-}
 
 
 
@@ -135,9 +116,7 @@ bool Worker::startup() {
 }
 
 
-bool  Worker::accept_new_conn() {
-    // if (!handle_new_conn)
-    //         return false;
+bool Worker::accept_new_conn() {
 
     int client_fd = accept(listen_fd, reinterpret_cast<sockaddr *>(&client_addr),&backend_len);
     if (client_fd == -1) {
@@ -147,43 +126,43 @@ bool  Worker::accept_new_conn() {
     int backend_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (backend_fd == -1) {
         log_error("Failed to create backend socket");
-        close(client_fd);
-        return true;
+        close(backend_fd);
+        backend_fd = -1;
     }
 
     auto backend = get_next_backend(ctx.config.load_balancer,ctx.load_balancer);
 
     if (backend.config == nullptr) {
         log_error("Failed to find next backend");
-        return true;
+        close(backend_fd);
+        backend_fd = -1;
     }
 
     if (connect(backend_fd, reinterpret_cast<sockaddr *>(&backend.config->server_addr),
         sizeof(backend.config->server_addr)) == -1) {
         log_error( "Failed to connect to backend");
         backend.stat->failed_connections.fetch_add(1);
-        close(client_fd);
         close(backend_fd);
-        return true;
+        backend_fd = -1;
     }
 
+
+    client_to_backend[client_fd] = std::make_unique<ProxyContext>(client_fd,backend_fd);
+
     set_nonblocking(client_fd);
-    set_nonblocking(backend_fd);
     add_epoll_fd(epoll_fd, client_fd, EPOLLIN | EPOLLET);
-    add_epoll_fd(epoll_fd, backend_fd, EPOLLIN | EPOLLET);
+    if (backend_fd != -1) {
+        set_nonblocking(backend_fd);
+        add_epoll_fd(epoll_fd, backend_fd, EPOLLIN | EPOLLET);
+        backend_to_client[backend_fd] = client_to_backend[client_fd].get();
+    }
 
-    auto ctx = std::make_unique<ProxyContext>(client_fd,backend_fd);
-
-
-    backend_to_client[backend_fd] = ctx.get();
-    client_to_backend[client_fd] = std::move(ctx);
-
-    log_info("New connection: client %d -> backend %d",client_fd,backend_fd);
+    log_debug("New connection: client %d -> backend %d",client_fd,backend_fd);
     backend.stat->connections.fetch_add(1);
     return false;
 }
 
-bool Worker::process_events() {
+void Worker::process_events() {
 
     auto ev_count = epoll_wait(epoll_fd, events, 10, -1);
     for (int i = 0;i < ev_count; i++) {
@@ -199,7 +178,6 @@ bool Worker::process_events() {
                 disconnect(events[i].data.fd);
         }
     }
-    return false;
 }
 
 bool Worker::process_read_event(epoll_event & ev) {
@@ -208,61 +186,45 @@ bool Worker::process_read_event(epoll_event & ev) {
     if (client_to_backend.contains(fd)) {
 
         auto ctx = client_to_backend[fd].get();
-        return handle_http_buffer(ctx->client_ctx,ev,epoll_fd);
+        auto last_count = ctx->client_ctx.queue.size();
+        if (handle_http_buffer(ctx->client_ctx))
+             return true;
+        if (last_count != ctx->client_ctx.queue.size()) {
+            log_info(ctx->client_ctx.queue.back().buffer.substr(0,ctx->client_ctx.queue.back().buffer.find("\r\n")).c_str());
+        }
+        if (!ctx->client_ctx.is_sending)
+            return send_http_buffer(ctx->client_ctx,ctx->backend_ctx,ev,epoll_fd);
+
     } else if (backend_to_client.contains(fd)) {
 
         auto ctx = backend_to_client[fd];
-        return handle_http_buffer(ctx->backend_ctx,ev,epoll_fd);
+        if (handle_http_buffer(ctx->backend_ctx))
+              return true;
+        if (!ctx->backend_ctx.is_sending)
+            return send_http_buffer(ctx->backend_ctx,ctx->client_ctx,ev,epoll_fd);
     }
     return true;
 }
 
 bool Worker::process_write_event(epoll_event & ev) {
     int fd = ev.data.fd;
-
     if (client_to_backend.contains(fd)) {
-
         auto ctx = client_to_backend[fd].get();
-        return send_http_buffer(ctx->client_ctx,ev,epoll_fd);
+        return send_http_buffer(ctx->backend_ctx,ctx->client_ctx,ev,epoll_fd);
     } else if (backend_to_client.contains(fd)) {
-
         auto ctx = backend_to_client[fd];
-        return send_http_buffer(ctx->backend_ctx,ev,epoll_fd);
+        return send_http_buffer(ctx->client_ctx,ctx->backend_ctx,ev,epoll_fd);
     }
     return true;
 }
 
 
-// bool Worker::try_accept_lock() {
-//     const int result = pthread_mutex_trylock(&ctx.load_balancer->accept_mutex);
-//     if (result == 0) {
-//         handle_new_conn = true;
-//         return false;
-//     }
-//     else if (result == EBUSY) {
-//         return false;
-//     }
-//     log_error("Access accept_mutex failed");
-//     return true;
-// }
-//
-// bool Worker::release_lock() {
-//     if (handle_new_conn) {
-//         handle_new_conn = false;
-//         const int result = pthread_mutex_unlock(&ctx.load_balancer->accept_mutex);
-//         if (result != 0) {
-//             return true;
-//         }
-//     }
-//     return false;
-// }
 
 void Worker::worker_loop() {
     if (startup())
         return;
     while (true) {
-        if (process_events())
-            break;
+        process_events();
     }
 
 }
