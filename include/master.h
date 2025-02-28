@@ -8,7 +8,7 @@
 #include "def.h"
 #include "process.h"
 
-class Master : Process {
+class Master : public Process {
 public:
     explicit Master(ProcContext&& _ctx);
     ~Master() {

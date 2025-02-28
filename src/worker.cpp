@@ -48,28 +48,14 @@ BackServer get_next_backend(LoadBalancerConfig & config, ShmLoadBalancer * lb) {
 void Worker::disconnect(int fd) {
 
     if (client_to_backend.contains(fd)) {
-        auto backend_fd = client_to_backend[fd]->backend_fd;
-        close_connection(epoll_fd, fd);
         client_to_backend.erase(fd);
-
-        if (backend_fd != -1) {
-            close_connection(epoll_fd, backend_fd);
-            backend_to_client.erase(backend_fd);
-        }
     } else if (backend_to_client.contains(fd)) {
-        int client_fd = backend_to_client[fd]->client_fd;
-        close_connection(epoll_fd, fd);
+        int client_fd = backend_to_client[fd]->client->id();
         backend_to_client.erase(fd);
-
-        close_connection(epoll_fd, client_fd);
         client_to_backend.erase(client_fd);
     }
    log_debug("Connection closed: %d", fd);
 }
-
-
-
-
 
 bool Worker::startup() {
     if ((listen_fd = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
@@ -115,14 +101,8 @@ bool Worker::startup() {
     return false;
 }
 
+int Worker::new_backend_fd() {
 
-bool Worker::accept_new_conn() {
-
-    int client_fd = accept(listen_fd, reinterpret_cast<sockaddr *>(&client_addr),&backend_len);
-    if (client_fd == -1) {
-        log_error("Failed to accept client");
-        return true;
-    }
     int backend_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (backend_fd == -1) {
         log_error("Failed to create backend socket");
@@ -144,21 +124,36 @@ bool Worker::accept_new_conn() {
         backend.stat->failed_connections.fetch_add(1);
         close(backend_fd);
         backend_fd = -1;
+        }
+    backend.stat->connections.fetch_add(1);
+    return backend_fd;
+}
+
+
+bool Worker::accept_new_conn() {
+
+    int client_fd = accept(listen_fd, reinterpret_cast<sockaddr *>(&client_addr),&backend_len);
+    if (client_fd == -1) {
+        log_error("Failed to accept client");
+        return true;
     }
+    int backend_fd = new_backend_fd();
 
+    client_to_backend[client_fd] = std::make_unique<ProxyHandler>();
+    client_to_backend[client_fd]->client = std::make_unique<NormalConnHandler>(this,client_fd,epoll_fd,true);
 
-    client_to_backend[client_fd] = std::make_unique<ProxyContext>(client_fd,backend_fd);
-
-    set_nonblocking(client_fd);
-    add_epoll_fd(epoll_fd, client_fd, EPOLLIN | EPOLLET);
     if (backend_fd != -1) {
-        set_nonblocking(backend_fd);
-        add_epoll_fd(epoll_fd, backend_fd, EPOLLIN | EPOLLET);
+        client_to_backend[client_fd]->backend = std::make_unique<NormalConnHandler>(this,backend_fd,epoll_fd,false);
+        backend_to_client[backend_fd] = client_to_backend[client_fd].get();
+    }
+    else {
+        client_to_backend[client_fd]->backend = std::make_unique<FailedBackendHandler>(this);
         backend_to_client[backend_fd] = client_to_backend[client_fd].get();
     }
 
+    client_to_backend[client_fd]->init_link();
+
     log_debug("New connection: client %d -> backend %d",client_fd,backend_fd);
-    backend.stat->connections.fetch_add(1);
     return false;
 }
 
@@ -180,28 +175,18 @@ void Worker::process_events() {
     }
 }
 
+
 bool Worker::process_read_event(epoll_event & ev) {
     int fd = ev.data.fd;
 
     if (client_to_backend.contains(fd)) {
 
-        auto ctx = client_to_backend[fd].get();
-        auto last_count = ctx->client_ctx.queue.size();
-        if (handle_http_buffer(ctx->client_ctx))
-             return true;
-        if (last_count != ctx->client_ctx.queue.size()) {
-            log_info(ctx->client_ctx.queue.back().buffer.substr(0,ctx->client_ctx.queue.back().buffer.find("\r\n")).c_str());
-        }
-        if (!ctx->client_ctx.is_sending)
-            return send_http_buffer(ctx->client_ctx,ctx->backend_ctx,ev,epoll_fd);
+        auto handler = client_to_backend[fd].get();
+        return handler->client->handle_read_event();
 
     } else if (backend_to_client.contains(fd)) {
-
-        auto ctx = backend_to_client[fd];
-        if (handle_http_buffer(ctx->backend_ctx))
-              return true;
-        if (!ctx->backend_ctx.is_sending)
-            return send_http_buffer(ctx->backend_ctx,ctx->client_ctx,ev,epoll_fd);
+        auto handler = backend_to_client[fd];
+        return handler->backend->handle_read_event();
     }
     return true;
 }
@@ -209,11 +194,13 @@ bool Worker::process_read_event(epoll_event & ev) {
 bool Worker::process_write_event(epoll_event & ev) {
     int fd = ev.data.fd;
     if (client_to_backend.contains(fd)) {
-        auto ctx = client_to_backend[fd].get();
-        return send_http_buffer(ctx->backend_ctx,ctx->client_ctx,ev,epoll_fd);
+
+        auto handler = client_to_backend[fd].get();
+        handler->client->handle_write_event();
+
     } else if (backend_to_client.contains(fd)) {
-        auto ctx = backend_to_client[fd];
-        return send_http_buffer(ctx->client_ctx,ctx->backend_ctx,ev,epoll_fd);
+        auto handler = backend_to_client[fd];
+        handler->backend->handle_write_event();
     }
     return true;
 }
@@ -228,3 +215,4 @@ void Worker::worker_loop() {
     }
 
 }
+

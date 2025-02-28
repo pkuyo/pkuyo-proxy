@@ -35,10 +35,4 @@ inline void remove_epoll_fd(int epoll_fd, int fd) {
     }
 }
 
-// 关闭连接
-void close_connection(int epoll_fd, int fd) {
-    remove_epoll_fd(epoll_fd, fd);
-    close(fd);
-}
-
 #endif //SEM_HELPER_H

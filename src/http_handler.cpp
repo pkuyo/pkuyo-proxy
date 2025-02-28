@@ -7,10 +7,12 @@
 
 #include "http_handler.h"
 
+#include <helper.h>
 #include <string>
 #include <unistd.h>
 #include <sys/epoll.h>
 #include <sstream>
+#include <worker.h>
 
 #include "spdlog/spdlog.h"
 
@@ -29,7 +31,8 @@ std::string get_status_msg(int errorCode) {
         default: return "Unknown Status";
     }
 }
-std::string gen_error_response(const char* content, int errorCode) {
+
+std::string gen_http_header(const char* content, int errorCode) {
     std::stringstream response;
 
     response << "HTTP/1.1 " << errorCode << " " << get_status_msg(errorCode) << "\r\n";
@@ -39,189 +42,111 @@ std::string gen_error_response(const char* content, int errorCode) {
     response << "Connection: close\r\n";
 
     response << "\r\n";
-    response << content;
-
     return response.str();
 }
 
-
-
-bool read_raw_buff(ConnectionContext & ctx) {
-    static char buffer[BUFFER_SIZE];
-    while (true) {
-        ssize_t bytes_read = read(ctx.fd,buffer,BUFFER_SIZE);
-        if (bytes_read == -1) {
-            if  (errno == EAGAIN || errno == EWOULDBLOCK)
-                return false;
-
-            spdlog::error("read_raw_buff failed, error:{}, pid:{}, from:{}, to:{}",strerror(errno), getpid(),
-                 ctx.fd,ctx.to_fd);
-            return true;
-        }
-        else if (bytes_read == 0) {
-            return true;
-        }
-        ctx.raw_buffer.append(buffer,bytes_read);
+//失败返回空
+std::string_view get_header_arg(const std::string_view& headers,const std::string_view& key) {
+    static const std::string zero("0");
+    size_t content_length_pos = headers.find(key);
+    if (content_length_pos == std::string::npos) {
+        return zero;
     }
+    content_length_pos+= key.size();
+    while (content_length_pos < headers.size() &&
+       (headers[content_length_pos] == ' ' || headers[content_length_pos] == '\t')) {
+        ++content_length_pos;
+       }
+    size_t end_pos = headers.find("\r\n", content_length_pos);
+    if (end_pos == std::string::npos) {
+        return {};
+    }
+    return headers.substr(content_length_pos, end_pos - content_length_pos);
 }
 
 size_t get_content_length(const std::string& headers) {
-    size_t content_length_pos = headers.find("Content-Length:");
-    if (content_length_pos == std::string::npos) {
-        return 0; // 没有Content-Length头
-    }
-    content_length_pos += 15;
-    while (content_length_pos < headers.size() &&
-           (headers[content_length_pos] == ' ' || headers[content_length_pos] == '\t')) {
-        ++content_length_pos;
-           }
-    size_t end_pos = headers.find("\r\n", content_length_pos);
-    if (end_pos == std::string::npos) {
-        return -1; // 格式错误
-    }
-    std::string value_str = headers.substr(content_length_pos, end_pos - content_length_pos);
+    auto value_str = std::string(get_header_arg(headers,"Content-Length:"));
     try {
         return std::stoul(value_str);
     } catch (...) {
-        return -1; // 转换失败
+        return -1;
     }
 }
+
 bool is_chunked(const std::string& headers) {
-    size_t transfer_encoding_pos = headers.find("Transfer-Encoding:");
-    if (transfer_encoding_pos == std::string::npos) {
-        return false;
-    }
-    size_t chunked_pos = headers.find("chunked", transfer_encoding_pos);
-    return chunked_pos != std::string::npos;
-}
-void parse_chunked_data(ConnectionContext& ctx) {
-    while (!ctx.raw_buffer.empty()) {
-        auto & current_context =  ctx.queue.back();
-        if (ctx.state == ConnectionContext::READ_CHUNK_SIZE) {
-            // 查找分块大小行
-            size_t chunk_size_end = ctx.raw_buffer.find("\r\n");
-            if (chunk_size_end == std::string::npos) {
-                break; // 数据不完整，等待更多数据
-            }
-
-            // 解析分块大小
-            std::string chunk_size_str = ctx.raw_buffer.substr(0, chunk_size_end);
-            size_t chunk_size = std::stoul(chunk_size_str, nullptr, 16); // 十六进制转十进制
-            ctx.raw_buffer.erase(0, chunk_size_end + 2); // 移除已解析的分块大小行
-
-            if (chunk_size == 0) {
-                // 最后一个分块，消息结束
-                ctx.state = ConnectionContext::READ_HEADERS;
-                current_context.is_completed = true;
-                break;
-            }
-
-            current_context.data.chunk_size = chunk_size;
-            ctx.state = ConnectionContext::READ_CHUNK_DATA;
-        } else if (ctx.state == ConnectionContext::READ_CHUNK_DATA) {
-            // 读取分块数据
-            size_t bytes_to_read = std::min(current_context.data.chunk_size, ctx.raw_buffer.size());
-            current_context.buffer.append(ctx.raw_buffer.data(), bytes_to_read);
-            ctx.raw_buffer.erase(0, bytes_to_read);
-            current_context.data.chunk_size -= bytes_to_read;
-
-            if (current_context.data.chunk_size == 0) {
-
-                if (ctx.raw_buffer.size() >= 2 && ctx.raw_buffer.substr(0, 2) == "\r\n") {
-                    ctx.raw_buffer.erase(0, 2);
-                }
-                ctx.state = ConnectionContext::READ_CHUNK_SIZE;
-            }
-        }
-    }
+    return get_header_arg(headers,"Transfer-Encoding:") == "chunked";
 }
 
-void parse_http_context(ConnectionContext & ctx) {
-    while (!ctx.raw_buffer.empty()) {
-
-        if (ctx.state == ConnectionContext::READ_HEADERS) {
-            size_t header_end = ctx.raw_buffer.find("\r\n\r\n");
-
-
-            if (header_end != std::string::npos) {
-                // 解析到完整的头部
-                HttpContext request;
-                request.buffer = ctx.raw_buffer.substr(0, header_end + 4);
-                if (is_chunked(ctx.raw_buffer)) {
-                    ctx.state = ConnectionContext::READ_CHUNK_SIZE;
-                }
-                else {
-                    request.data.content_remaining = get_content_length(request.buffer);
-                    if ( request.data.content_remaining == -1) {
-                        ctx.raw_buffer.erase(0, header_end + 4);
-                        spdlog::error("get_content_length failed, pid:{}, from:{}, to:{}", getpid(),
-                            ctx.fd,ctx.to_fd);
-                        continue;
-                    }
-                    ctx.state = ConnectionContext::READ_BODY;
-                    if (request.data.content_remaining == 0) {
-                        ctx.state = ConnectionContext::READ_HEADERS;
-                        request.is_completed = true;
-                    }
-                }
-                ctx.queue.push(std::move(request));
-                ctx.raw_buffer.erase(0, header_end + 4); // 移除已解析的头部
-
-
-            } else {
-                // 头部不完整，等待更多数据
-                break;
-            }
-        }
-        else if (ctx.state == ConnectionContext::READ_BODY) {
-            auto & current_context = ctx.queue.back();
-            // 读取消息体
-            size_t bytes_to_read = std::min(current_context.data.content_remaining, ctx.raw_buffer.size());
-            current_context.buffer.append(ctx.raw_buffer.data(), bytes_to_read);
-            ctx.raw_buffer.erase(0, bytes_to_read); // 移除已解析的消息体
-            current_context.data.content_remaining -= bytes_to_read;
-
-            if (current_context.data.content_remaining == 0) {
-                ctx.state = ConnectionContext::READ_HEADERS;
-                current_context.is_completed = true;
-            }
-        }
-        else if (ctx.state == ConnectionContext::READ_CHUNK_SIZE || ctx.state == ConnectionContext::READ_CHUNK_DATA) {
-            // 解析chunked数据
-            parse_chunked_data(ctx);
-        }
+bool get_request_head(HttpContext & context) {
+    std::string_view headers = context.header;
+    auto pos = headers.find(' ');
+    if (pos == std::string::npos) {
+        return true;
     }
+    context.request.method = headers.substr(0, pos);
+    auto pos2 = headers.find(' ',pos+1);
+    if (pos2 == std::string::npos) {
+        return true;
+    }
+    context.request.url_path = headers.substr(pos+1, pos2);
+    return false;
 }
 
-bool send_http_buffer(ConnectionContext & ctx, ConnectionContext & rev_ctx, epoll_event & ev, int epoll_id) {
-    if (ctx.to_fd == -1) {
-        while (!ctx.queue.empty()) {
-            ctx.queue.pop();
-            //TODO:优化性能
-            rev_ctx.queue.push(HttpContext{.is_completed = true,.buffer = gen_error_response(backend_error_response,502)});
-        }
-        if (!rev_ctx.is_sending)
-            return send_http_buffer(rev_ctx, ctx, ev, epoll_id);
-        return false;
+bool get_response_head(HttpContext & context) {
+    std::string_view headers = context.header;
+    auto pos = headers.find(' ');
+    if (pos == std::string::npos) {
+        return true;
     }
+    context.response.status_code = headers.substr(0, pos);
+    return false;
+}
+
+
+void FailedBackendHandler::recv_content(HttpContext &&content) {
+    HttpContext response;
+    response.header = gen_http_header(backend_error_response, 502);
+    response.content = backend_error_response;
+    response.complete();
+    rev_handler->recv_content(std::move(response));
+}
+
+char NormalConnHandler::buffer[BUFFER_SIZE]{};
+
+NormalConnHandler:: NormalConnHandler(Worker* owner,int _fd, int _epoll_fd, bool _is_request)
+    : IConnHandler(owner),fd(_fd),epoll_fd(_epoll_fd),is_request(_is_request) {
+    set_nonblocking(_fd);
+    add_epoll_fd(_epoll_fd, _fd, EPOLLIN | EPOLLET);
+}
+
+bool NormalConnHandler::handle_read_event() {
+    if (read_raw_buff()) {
+        return true;
+    }
+    parse_http_context();
+    return false;
+}
+
+bool NormalConnHandler::handle_write_event() {
     bool result, need_listen = false;
     while (true) {
-        if (ctx.queue.empty() || !ctx.queue.front().is_completed) {
+        if (queue.empty() || !queue.front().is_completed) {
             result = false;
             need_listen = false;
             break;
         }
-        auto & current_context = ctx.queue.front();
-
-        ssize_t byte_send = write(ctx.to_fd,current_context.buffer.data(),current_context.buffer.size());
+        auto & current_context = queue.front();
+        auto & buffer = current_context.header;
+        if (current_context.state == HttpContext::SEND_CONTENT)
+            buffer = current_context.content;
+        ssize_t byte_send = write(fd,buffer.data(),buffer.size());
         if (byte_send == -1) {
             if  (errno == EAGAIN || errno == EWOULDBLOCK) {
                 result = false;
                 need_listen = true;
                 break;
             }
-            spdlog::error("send http buff failed, error:{}, pid:{}, from:{}, to:{}",strerror(errno), getpid(),
-                ctx.fd,ctx.to_fd);
+            owner->log_error("send http buff failed, error:%s, fd:%d",strerror(errno),fd);
             result = true;
             break;
         }
@@ -229,38 +154,190 @@ bool send_http_buffer(ConnectionContext & ctx, ConnectionContext & rev_ctx, epol
             result = true;
             break;
         }
-        if (byte_send != current_context.buffer.size()) {
-            current_context.buffer.erase(0,byte_send);
+        if (byte_send != buffer.size()) {
+            buffer.erase(0,byte_send);
         }
         else {
-            ctx.queue.pop();
+            if (current_context.state == HttpContext::SEND_CONTENT || current_context.content.empty()) {
+                queue.pop();
+                current_context.state = HttpContext::SEND_HEADER;
+            }
+            else
+                current_context.state = HttpContext::SEND_CONTENT;
         }
     }
     if (!result) {
-        if (need_listen && !ctx.is_sending) {
-            ev.events = EPOLLIN | EPOLLET | EPOLLOUT;
-            ev.data.fd = ctx.to_fd;
-            epoll_ctl(epoll_id, EPOLL_CTL_MOD, ctx.to_fd, &ev);
-            ctx.is_sending = true;
+        if (need_listen && !is_sending) {
+            event.events = EPOLLIN | EPOLLET | EPOLLOUT;
+            event.data.fd = fd;
+            epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &event);
+            is_sending = true;
         }
-        else if (!need_listen && ctx.is_sending) {
-            ev.events = EPOLLIN | EPOLLET;
-            ev.data.fd = ctx.to_fd;
-            epoll_ctl(epoll_id, EPOLL_CTL_MOD, ctx.to_fd, &ev);
-            ctx.is_sending = false;
+        else if (!need_listen && is_sending) {
+            event.events = EPOLLIN | EPOLLET;
+            event.data.fd = fd;
+            epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &event);
+            is_sending = false;
         }
     }
     return result;
 }
 
-bool handle_http_buffer(ConnectionContext & ctx) {
-    //后端服务器连接失败情况
-    if (ctx.fd == -1)
-        return false;
-
-    if (read_raw_buff(ctx))
-        return true;
-    parse_http_context(ctx);
-    return false;
+NormalConnHandler::~NormalConnHandler() {
+    if (fd != -1)
+        close(fd);
 }
+
+void NormalConnHandler::log_access() {
+    if (is_request) {
+        if (get_request_head(tmp_context)) {
+            owner->log_error("get_request_head failed, fd:%d", fd);
+            return;
+        }
+        owner->log_info("reqeust: %.*s %.*s",
+            static_cast<int>(tmp_context.request.method.size()),
+            tmp_context.request.method.data(),
+            static_cast<int>(tmp_context.request.url_path.size()),
+            tmp_context.request.url_path.data());
+    }
+    else {
+        if (get_response_head(tmp_context)) {
+            owner->log_error("get_response_head failed, fd:%d", fd);
+            return;
+        }
+        owner->log_info("response: %.*s %.*s",
+         static_cast<int>(tmp_context.response.status_code.size()),
+         tmp_context.response.status_code.data());
+    }
+}
+
+bool NormalConnHandler::read_raw_buff() {
+    while (true) {
+        ssize_t bytes_read = read(fd,buffer,BUFFER_SIZE);
+        if (bytes_read == -1) {
+            if  (errno == EAGAIN || errno == EWOULDBLOCK)
+                return false;
+
+            owner->log_error("read_raw_buff failed, error:%s, fd:%d",strerror(errno),fd);
+            return true;
+        }
+        else if (bytes_read == 0) {
+            return true;
+        }
+        raw_buffer.append(buffer,bytes_read);
+    }
+}
+
+void NormalConnHandler::parse_http_context() {
+    while (!raw_buffer.empty()) {
+
+        if (state == ConnState::READ_HEADERS) {
+            size_t header_end = raw_buffer.find("\r\n\r\n");
+
+
+            if (header_end != std::string::npos) {
+                // 解析到完整的头部
+                tmp_context.reset();
+                tmp_context.header = raw_buffer.substr(0, header_end + 4);
+                if (is_chunked(raw_buffer)) {
+                    state = ConnState::READ_CHUNK_SIZE;
+                    log_access();
+                }
+                else {
+                    tmp_context.data.content_remaining = get_content_length(tmp_context.header);
+                    if (tmp_context.data.content_remaining == -1) {
+                        raw_buffer.erase(0, header_end + 4);
+                        owner->log_error("get_content_length failed, fd:%d", fd);
+                        continue;
+                    }
+                    state = ConnState::READ_BODY;
+                    log_access();
+                    if (tmp_context.data.content_remaining == 0) {
+                        state = ConnState::READ_HEADERS;
+                        tmp_context.complete();
+                        rev_handler->recv_content(std::move(tmp_context));
+                    }
+                }
+                raw_buffer.erase(0, header_end + 4); // 移除已解析的头部
+
+
+            } else {
+                // 头部不完整，等待更多数据
+                break;
+            }
+        }
+        else if (state == ConnState::READ_BODY) {
+            // 读取消息体
+            size_t bytes_to_read = std::min(tmp_context.data.content_remaining, raw_buffer.size());
+            tmp_context.content.append(raw_buffer.data(), bytes_to_read);
+            raw_buffer.erase(0, bytes_to_read); // 移除已解析的消息体
+            tmp_context.data.content_remaining -= bytes_to_read;
+
+            if (tmp_context.data.content_remaining == 0) {
+                state = ConnState::READ_HEADERS;
+                tmp_context.complete();
+                rev_handler->recv_content(std::move(tmp_context));
+            }
+        }
+        else if (state == ConnState::READ_CHUNK_SIZE || state == ConnState::READ_CHUNK_DATA) {
+            parse_chunked_content();
+        }
+    }
+}
+
+void NormalConnHandler::parse_chunked_content() {
+      while (!raw_buffer.empty()) {
+        if (state == ConnState::READ_CHUNK_SIZE) {
+            // 查找分块大小行
+            size_t chunk_size_end = raw_buffer.find("\r\n");
+            if (chunk_size_end == std::string::npos) {
+                break;
+            }
+            std::string chunk_size_str = raw_buffer.substr(0, chunk_size_end);
+            size_t chunk_size = std::stoul(chunk_size_str, nullptr, 16);
+            raw_buffer.erase(0, chunk_size_end + 2);
+
+            if (chunk_size == 0) {
+                // 消息结束
+                state = ConnState::READ_HEADERS;
+                tmp_context.complete();
+                rev_handler->recv_content(std::move(tmp_context));
+                break;
+            }
+
+            tmp_context.data.chunk_size = chunk_size;
+            state = ConnState::READ_CHUNK_DATA;
+        } else if (state == ConnState::READ_CHUNK_DATA) {
+            // 读取分块数据
+            size_t bytes_to_read = std::min(tmp_context.data.chunk_size, raw_buffer.size());
+            tmp_context.content.append(raw_buffer.data(), bytes_to_read);
+            raw_buffer.erase(0, bytes_to_read);
+            tmp_context.data.chunk_size -= bytes_to_read;
+
+            if (tmp_context.data.chunk_size == 0) {
+
+                if (raw_buffer.size() >= 2 && raw_buffer.substr(0, 2) == "\r\n") {
+                    raw_buffer.erase(0, 2);
+                }
+                state = ConnState::READ_CHUNK_SIZE;
+            }
+        }
+    }
+}
+
+
+
+void NormalConnHandler::recv_content(HttpContext &&content) {
+    queue.push(std::move(content));
+    if (!is_sending)
+        handle_write_event();
+}
+
+
+
+
+
+
+
+
 

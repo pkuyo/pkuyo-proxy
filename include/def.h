@@ -68,69 +68,83 @@ struct ProcContext {
 
 
 struct BackendStat {
-    std::atomic<int> connections = 0; // 当前连接数（用于最小连接数策略）
+    std::atomic<int> connections = 0;
     std::atomic<int> failed_connections = 0;
 };
 struct ShmLoadBalancer {
-    //pthread_mutex_t accept_mutex{};
     std::atomic<int> current_index = 0;
     BackendStat* stats = nullptr;
-
-    ShmLoadBalancer() {
-        // pthread_mutexattr_t attr;
-        // pthread_mutexattr_init(&attr);
-        // pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
-        // pthread_mutex_init(&accept_mutex, &attr);
-    }
 };
 
 struct epoll_event;
+
 const int MAX_EVENTS = 1024;
 const int BUFFER_SIZE = 4096;
 
 struct HttpContext {
+
+    enum SendState {
+        SEND_HEADER,
+        SEND_CONTENT,
+    };
+
     union {
         size_t content_remaining;
         size_t chunk_size;
-    } data;
+    } data{};
+
+    SendState state = SEND_HEADER;
 
     bool is_completed;
-    std::string buffer;
+
+
+    struct {
+        std::string_view url_path;
+        std::string_view method;
+    } request;
+    struct {
+        std::string_view status_code;
+    } response;
+
+    std::string header;
+    std::string content;
+    HttpContext() noexcept: is_completed(false) {
+    }
+
+    HttpContext(HttpContext && other) noexcept : is_completed(other.is_completed),
+                                                 request(other.request),
+                                                 response(other.response),
+                                                 state(other.state),
+                                                 header(std::move(other.header)),
+                                                 content(std::move(other.content)) {
+
+    }
+
+    void complete() {
+        is_completed = true;
+        state = SEND_HEADER;
+    }
+
+    void reset() {
+        data.chunk_size = 0;
+        is_completed = false;
+        state = SEND_HEADER;
+        header.clear();
+        content.clear();
+        request.url_path = request.method = header;
+        response.status_code = "200";
+
+    }
+};
+
+enum class ConnState {
+    READ_HEADERS,
+    READ_BODY,
+    READ_CHUNK_SIZE,
+    READ_CHUNK_DATA,
 };
 
 
-
-struct ConnectionContext {
-    int fd;
-    int to_fd;
-
-    enum {
-        READ_HEADERS,
-        READ_BODY,
-        READ_CHUNK_SIZE,
-        READ_CHUNK_DATA,
-        } state = READ_HEADERS;
-    bool is_sending;
-    std::queue<HttpContext> queue;
-    std::string raw_buffer;
-};
-
-
-struct ProxyContext {
-
-    ProxyContext(int client_fd,int backend_fd) :
-        client_ctx{.fd = client_fd, .to_fd = backend_fd},
-        backend_ctx{.fd = backend_fd, .to_fd = client_fd},
-        client_fd(client_fd),
-        backend_fd(backend_fd)
-    {}
-
-    ConnectionContext client_ctx;
-    ConnectionContext backend_ctx;
-
-    int client_fd;
-    int backend_fd;
-};
 
 
 pid_t fork_with_cleanup();

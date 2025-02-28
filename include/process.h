@@ -10,10 +10,10 @@ struct Process {
     explicit Process(ProcContext&& _ctx) : ctx(std::move(_ctx)), format_buffer{} {
     }
 
-    ProcContext ctx;
     char format_buffer[512];
 
-protected:
+public:
+    ProcContext ctx;
     template<typename ...Args>
     void log_info(const char * message, Args... args) {
         sprintf(format_buffer,message,std::forward<Args>(args)...);

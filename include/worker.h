@@ -11,8 +11,8 @@
 #include "def.h"
 #include "process.h"
 #include "spdlog/spdlog.h"
+#include "http_handler.h"
 
-struct ProxyContext;
 
 class Worker : public Process {
     int epoll_fd = -1;
@@ -25,8 +25,8 @@ class Worker : public Process {
 
     uint backend_len = sizeof(sockaddr_in);
 
-    std::map<int, std::unique_ptr<ProxyContext>> client_to_backend;
-    std::map<int, ProxyContext*> backend_to_client;
+    std::map<int, std::unique_ptr<ProxyHandler>> client_to_backend;
+    std::map<int, ProxyHandler*> backend_to_client;
 
 public:
     explicit Worker(ProcContext&& _ctx);
@@ -34,6 +34,8 @@ public:
 
 
 private:
+
+    int new_backend_fd();
 
     void disconnect(int fd);
 
