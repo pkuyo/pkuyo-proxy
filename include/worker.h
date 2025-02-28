@@ -8,25 +8,26 @@
 #include <memory>
 #include <sys/epoll.h>
 #include <arpa/inet.h>
+
 #include "def.h"
+
 #include "process.h"
 #include "spdlog/spdlog.h"
-#include "http_handler.h"
 
+#include "proxy_handler.h"
+#include "listen_handler.h"
+#include "conn_handler.h"
 
 class Worker : public Process {
-    int epoll_fd = -1;
-    int listen_fd = -1;
-
-    bool handle_new_conn = false;
 
     epoll_event events[MAX_EVENTS];
     sockaddr_in client_addr{};
 
-    uint backend_len = sizeof(sockaddr_in);
 
     std::map<int, std::unique_ptr<ProxyHandler>> client_to_backend;
     std::map<int, ProxyHandler*> backend_to_client;
+
+    std::unique_ptr<IListenHandler> listen_handler;
 
 public:
     explicit Worker(ProcContext&& _ctx);
@@ -35,7 +36,7 @@ public:
 
 private:
 
-    int new_backend_fd();
+    std::unique_ptr<IConnHandler> new_backend_fd();
 
     void disconnect(int fd);
 

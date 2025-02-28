@@ -5,7 +5,7 @@
 // Created by pkuyo on 25-2-25.
 //
 
-#include "http_handler.h"
+#include "proxy_handler.h"
 
 #include <fstream>
 #include <helper.h>
@@ -137,10 +137,8 @@ void FailedBackendHandler::recv_content(HttpContext &&content) {
 
 char NormalConnHandler::buffer[BUFFER_SIZE]{};
 
-NormalConnHandler::NormalConnHandler(Worker* owner,int _fd, int _epoll_fd, bool _is_request)
-    : IConnHandler(owner),fd(_fd),epoll_fd(_epoll_fd),is_request(_is_request) {
-    set_nonblocking(_fd);
-    add_epoll_fd(_epoll_fd, _fd, EPOLLIN | EPOLLET);
+NormalConnHandler::NormalConnHandler(Worker* owner,std::unique_ptr<IConnHandler>&& _conn_handler, bool _is_request)
+    : IProxyHandler(owner),conn_handler(std::move(_conn_handler)),is_request(_is_request) {
 }
 
 bool NormalConnHandler::handle_read_event() {
@@ -163,14 +161,14 @@ bool NormalConnHandler::handle_write_event() {
         auto & buffer = current_context.header;
         if (current_context.state == HttpContext::SEND_CONTENT)
             buffer = current_context.content;
-        ssize_t byte_send = write(fd,buffer.data(),buffer.size());
+        ssize_t byte_send = conn_handler->write(buffer.data(),buffer.size());
         if (byte_send == -1) {
             if  (errno == EAGAIN || errno == EWOULDBLOCK) {
                 result = false;
                 need_listen = true;
                 break;
             }
-            owner->log_error("send http buff failed, error:%s, fd:%d",strerror(errno),fd);
+            owner->log_error("send http buff failed, error:%s",strerror(errno));
             result = true;
             break;
         }
@@ -192,32 +190,24 @@ bool NormalConnHandler::handle_write_event() {
     }
     if (!result) {
         if (need_listen && !is_sending) {
-            event.events = EPOLLIN | EPOLLET | EPOLLOUT;
-            event.data.fd = fd;
-            epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &event);
+
+            conn_handler->modify_event(EPOLLIN | EPOLLET | EPOLLOUT,&event);
+
             is_sending = true;
         }
         else if (!need_listen && is_sending) {
-            event.events = EPOLLIN | EPOLLET;
-            event.data.fd = fd;
-            epoll_ctl(epoll_fd, EPOLL_CTL_MOD, fd, &event);
+            conn_handler->modify_event(EPOLLIN | EPOLLET ,&event);
             is_sending = false;
         }
     }
     return result;
 }
 
-NormalConnHandler::~NormalConnHandler() {
-    if (fd != -1) {
-        epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, nullptr);
-        close(fd);
-    }
-}
 
 void NormalConnHandler::log_access() {
     if (is_request) {
         if (get_request_head(tmp_context)) {
-            owner->log_error("get_request_head failed, fd:%d", fd);
+            owner->log_error("get_request_head failed");
             return;
         }
         owner->log_info("reqeust: %.*s %.*s",
@@ -228,7 +218,7 @@ void NormalConnHandler::log_access() {
     }
     else {
         if (get_response_head(tmp_context)) {
-            owner->log_error("get_response_head failed, fd:%d", fd);
+            owner->log_error("get_response_head failed");
             return;
         }
     }
@@ -236,12 +226,12 @@ void NormalConnHandler::log_access() {
 
 bool NormalConnHandler::read_raw_buff() {
     while (true) {
-        ssize_t bytes_read = read(fd,buffer,BUFFER_SIZE);
+        ssize_t bytes_read = conn_handler->read(buffer,BUFFER_SIZE);
         if (bytes_read == -1) {
             if  (errno == EAGAIN || errno == EWOULDBLOCK)
                 return false;
 
-            owner->log_error("read_raw_buff failed, error:%s, fd:%d",strerror(errno),fd);
+            owner->log_error("read_raw_buff failed, error:%s",strerror(errno));
             return true;
         }
         else if (bytes_read == 0) {
@@ -270,7 +260,7 @@ void NormalConnHandler::parse_http_context() {
                     tmp_context.data.content_remaining = get_content_length(tmp_context.header);
                     if (tmp_context.data.content_remaining == -1) {
                         raw_buffer.erase(0, header_end + 4);
-                        owner->log_error("get_content_length failed, fd:%d", fd);
+                        owner->log_error("get_content_length failed");
                         continue;
                     }
                     state = ConnState::READ_BODY;

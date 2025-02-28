@@ -5,6 +5,7 @@
 #ifndef HTTP_HANDER_H
 #define HTTP_HANDER_H
 
+#include <conn_handler.h>
 #include <memory>
 #include <sys/epoll.h>
 
@@ -13,18 +14,18 @@
 
 class Worker;
 
-class IConnHandler {
+class IProxyHandler {
 protected:
 
-    explicit IConnHandler(Worker* _owner) : owner(_owner) {}
+    explicit IProxyHandler(Worker* _owner) : owner(_owner) {}
 
 public:
 
     Worker* owner;
 
-    IConnHandler* rev_handler = nullptr;
+    IProxyHandler* rev_handler = nullptr;
 
-    virtual ~IConnHandler() = default;
+    virtual ~IProxyHandler() = default;
 
     virtual bool handle_read_event() {
         return false;
@@ -43,8 +44,8 @@ public:
 
 
 struct ProxyHandler {
-    std::unique_ptr<IConnHandler> client;
-    std::unique_ptr<IConnHandler> backend;
+    std::unique_ptr<IProxyHandler> client;
+    std::unique_ptr<IProxyHandler> backend;
 
     void init_link() const {
         backend->rev_handler = client.get();
@@ -53,16 +54,16 @@ struct ProxyHandler {
 };
 
 
-class FailedBackendHandler final : public IConnHandler {
+class FailedBackendHandler final : public IProxyHandler {
 public:
     explicit FailedBackendHandler(Worker *_owner)
-        : IConnHandler(_owner) {
+        : IProxyHandler(_owner) {
     }
 
     void recv_content(HttpContext&& content) override;
 };
 
-class NormalConnHandler final : public IConnHandler {
+class NormalConnHandler final : public IProxyHandler {
 
     std::queue<HttpContext> queue;
 
@@ -75,8 +76,8 @@ class NormalConnHandler final : public IConnHandler {
 
     bool is_request;
 
-    int fd;
-    int epoll_fd;
+    std::unique_ptr<IConnHandler> conn_handler;
+
 
     epoll_event event{};
 
@@ -84,7 +85,7 @@ class NormalConnHandler final : public IConnHandler {
 
 
 public:
-    explicit NormalConnHandler(Worker* owner,int _fd, int _epoll_fd, bool _is_request);
+    explicit NormalConnHandler(Worker* owner,std::unique_ptr<IConnHandler>&& _conn_handler, bool _is_request);
 
     void recv_content(HttpContext &&content) override;
 
@@ -93,10 +94,9 @@ public:
     bool handle_write_event() override;
 
     int id() override {
-        return fd;
+        return conn_handler->conn_fd;
     }
 
-    ~NormalConnHandler() override;
 private:
     void log_access();
     bool read_raw_buff();
@@ -104,7 +104,7 @@ private:
     void parse_chunked_content();
 };
 
-class StaticFileHandler final : public IConnHandler {
+class StaticFileHandler final : public IProxyHandler {
 
     std::string root_dir;
 
@@ -116,7 +116,7 @@ class StaticFileHandler final : public IConnHandler {
 
 public:
     StaticFileHandler(Worker* owner, const std::string& root)
-        : IConnHandler(owner), root_dir(root) {}
+        : IProxyHandler(owner), root_dir(root) {}
 
     void recv_content(HttpContext&& context) override;
 

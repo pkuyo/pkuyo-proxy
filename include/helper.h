@@ -6,6 +6,7 @@
 #define SEM_HELPER_H
 #include <sys/sem.h>
 #include <fcntl.h>
+#include <stdexcept>
 
 // 设置文件描述符为非阻塞模式
 inline void set_nonblocking(int fd) {

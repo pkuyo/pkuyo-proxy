@@ -10,7 +10,6 @@
 #include "init_listener.h"
 
 
-
 const char* PID_FILE = "/var/run/pkuyo_proxy.pid";
 
 //设置子进程退出

@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.30)
 project(proxy)
+find_package(OpenSSL REQUIRED)
 
 set(CMAKE_CXX_STANDARD 20)
 
@@ -14,13 +15,14 @@ include_directories(include)
 add_executable(proxy src/main.cpp
         src/config_loader.cpp
         src/init_listener.cpp
-        src/http_handler.cpp
+        src/proxy_handler.cpp
         src/worker.cpp
         src/master.cpp
         src/logger.cpp
         src/def.cpp
-        include/process.h
-        src/process.cpp)
+        src/process.cpp
+        src/conn_handler.cpp
+        src/listen_handler.cpp)
 
 
 
@@ -30,3 +32,4 @@ add_subdirectory(${SPDLOG_DIR})
 
 target_link_libraries(proxy PRIVATE ${JANSSON_LIBRARIES})
 target_link_libraries(proxy PRIVATE spdlog::spdlog $<$<BOOL:${MINGW}>:ws2_32>)
+target_link_libraries(proxy PRIVATE OpenSSL::SSL OpenSSL::Crypto)
