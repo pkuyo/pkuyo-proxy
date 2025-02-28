@@ -97,7 +97,7 @@ bool Worker::startup() {
 
     // 添加监听套接字到 epoll
     set_nonblocking(listen_fd);
-    add_epoll_fd(epoll_fd, listen_fd, EPOLLIN | EPOLLET);
+    add_epoll_fd(epoll_fd, listen_fd, EPOLLIN);
     log_info("Listen on port:%d",ctx.config.port);
     return false;
 }
@@ -135,10 +135,18 @@ bool Worker::accept_new_conn() {
 
     int client_fd = accept(listen_fd, reinterpret_cast<sockaddr *>(&client_addr),&backend_len);
     if (client_fd == -1) {
-        log_error("Failed to accept client");
+        if (errno == EMFILE || errno == ENFILE) {
+            epoll_event ev{};
+            ev.events = 0;
+            ev.data.fd = listen_fd;
+            epoll_ctl(epoll_fd, EPOLL_CTL_MOD, listen_fd, &ev);
+            log_error("FD limit reached, paused accepting");
+            // TODO:设置定时器或标记，稍后恢复
+        } else {
+            log_error("accept failed: %s", strerror(errno));
+        }
         return true;
     }
-
     client_to_backend[client_fd] = std::make_unique<ProxyHandler>();
     client_to_backend[client_fd]->client = std::make_unique<NormalConnHandler>(this,client_fd,epoll_fd,true);
 
@@ -161,7 +169,7 @@ bool Worker::accept_new_conn() {
             ctx.config.static_file.root_path);
 
         client_to_backend[client_fd]->init_link();
-        log_debug("New connection: client %d -> static",client_fd);
+        //log_debug("New connection: client %d -> static",client_fd);
 
     }
     return false;
@@ -169,7 +177,7 @@ bool Worker::accept_new_conn() {
 
 void Worker::process_events() {
 
-    auto ev_count = epoll_wait(epoll_fd, events, 10, -1);
+    auto ev_count = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
     for (int i = 0;i < ev_count; i++) {
         if (events[i].data.fd == listen_fd) {
             accept_new_conn();

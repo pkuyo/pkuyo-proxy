@@ -9,6 +9,8 @@
 #include "config_loader.h"
 #include "init_listener.h"
 
+
+
 const char* PID_FILE = "/var/run/pkuyo_proxy.pid";
 
 //设置子进程退出
@@ -18,6 +20,9 @@ bool needExit = false;
 bool need_reload = true;
 
 void create_daemon() {
+
+#ifndef FRONT
+
     pid_t pid = fork();
 
     if (pid < 0) {
@@ -35,6 +40,7 @@ void create_daemon() {
         exit(1);
     }
 
+#endif
 
     if (chdir("/") < 0) {
         fprintf(stderr,"Failed to change directory!");
@@ -154,6 +160,10 @@ int main(int argc, char* argv[]) {
         exit(1);
     }
     if (strcmp(argv[1], "init") == 0) {
+        if (access(PID_FILE, F_OK) != -1) {
+            fprintf(stderr,"already started proxy");
+            exit(1);
+        }
         init();
     }
     else {

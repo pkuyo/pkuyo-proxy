@@ -25,6 +25,7 @@ std::string get_status_msg(int errorCode) {
         case 400: return "Bad Request";
         case 405: return "Method Not Allowed";
         case 404: return "Not Found";
+        case 200: return "OK";
         default: return "Unknown Status";
     }
 }
@@ -98,20 +99,36 @@ bool get_request_head(HttpContext & context) {
 }
 
 bool get_response_head(HttpContext & context) {
-    std::string_view headers = context.header;
-    auto pos = headers.find(' ');
-    if (pos == std::string::npos) {
+    std::string_view header = context.header;
+    size_t first_space = header.find(' ');
+    if (first_space == std::string_view::npos) {
         return true;
     }
-    context.response.status_code = headers.substr(0, pos);
-    return false;
+
+
+    // 查找第二个空格
+    size_t second_space = header.find(' ', first_space + 1);
+    if (second_space == std::string_view::npos) {
+        second_space = header.size();
+    }
+
+    // 提取状态码部分
+    std::string_view status_code_str = header.substr(first_space + 1, second_space - (first_space + 1));
+
+    // 尝试将状态码字符串转换为整数
+    try {
+        context.response.status_code = std::stoi(std::string(status_code_str));
+        return false;
+    } catch (const std::exception&) {
+        return true; // 转换失败
+    }
 }
 
 
 void FailedBackendHandler::recv_content(HttpContext &&content) {
     HttpContext response;
     response.content = backend_error_response(502);
-    response.header = gen_http_header(   response.content.c_str(), 502);
+    response.header = gen_http_header(response.content.c_str(), 502);
     response.complete();
     get_response_head(response);
 
@@ -191,8 +208,10 @@ bool NormalConnHandler::handle_write_event() {
 }
 
 NormalConnHandler::~NormalConnHandler() {
-    if (fd != -1)
+    if (fd != -1) {
+        epoll_ctl(epoll_fd, EPOLL_CTL_DEL, fd, nullptr);
         close(fd);
+    }
 }
 
 void NormalConnHandler::log_access() {
@@ -212,9 +231,6 @@ void NormalConnHandler::log_access() {
             owner->log_error("get_response_head failed, fd:%d", fd);
             return;
         }
-        owner->log_info("response: %.*s %.*s",
-         static_cast<int>(tmp_context.response.status_code.size()),
-         tmp_context.response.status_code.data());
     }
 }
 
@@ -347,7 +363,10 @@ void NormalConnHandler::recv_content(HttpContext &&content) {
     } else if (is_request && !content.response.is_valid()) {
         content.content = backend_error_response(500);
         content.header = gen_http_header(content.content .c_str(), 500);
+        get_response_head(content);
     }
+    if (is_request)
+        owner->log_info("response: %d",content.response.status_code);
     queue.push(std::move(content));
     if (!is_sending)
         handle_write_event();

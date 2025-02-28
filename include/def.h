@@ -10,6 +10,7 @@
 #include <vector>
 #include <arpa/inet.h>
 
+#define MAX_EVENTS 30
 
 enum class LoadBalancingAlgorithm {
     RoundRobin,         // 轮询
@@ -90,7 +91,6 @@ struct ShmLoadBalancer {
 
 struct epoll_event;
 
-const int MAX_EVENTS = 1024;
 const int BUFFER_SIZE = 4096;
 
 struct HttpContext {
@@ -118,9 +118,9 @@ struct HttpContext {
         }
     } request;
     struct {
-        std::string_view status_code;
+        int status_code = -1;
         [[nodiscard]] bool is_valid() const {
-            return !status_code.empty();
+            return status_code != -1;
         }
     } response;
 
@@ -150,7 +150,7 @@ struct HttpContext {
         header.clear();
         content.clear();
         request.url_path = request.method = "";
-        response.status_code = "";
+        response.status_code = -1;
 
     }
 };

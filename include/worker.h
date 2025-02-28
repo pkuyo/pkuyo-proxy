@@ -20,7 +20,7 @@ class Worker : public Process {
 
     bool handle_new_conn = false;
 
-    epoll_event events[10];
+    epoll_event events[MAX_EVENTS];
     sockaddr_in client_addr{};
 
     uint backend_len = sizeof(sockaddr_in);
