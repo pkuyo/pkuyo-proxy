@@ -14,8 +14,13 @@
 
 #include "init_listener.h"
 
+#include <csignal>
+#include <sys/wait.h>
+
 #include "worker.h"
 #include "master.h"
+
+extern bool needExit;
 
 //创建新的共享内存区域
 void init_mmap(ProcContext & ctx) {
@@ -46,7 +51,9 @@ void init_mmap(ProcContext & ctx) {
 }
 
 
-
+void waitpid_signal_handler(int) {
+    while (waitpid(-1, nullptr, WNOHANG) > 0);
+}
 
 void start_listener(ListenerConfig & config) {
 
@@ -55,8 +62,6 @@ void start_listener(ListenerConfig & config) {
     init_mmap(ctx);
 
     for (int current_count = 0;current_count < config.process_count;current_count++) {
-        int fd[2];
-        pipe(fd);
         pid_t pid = fork_with_cleanup();
         if (pid == 0) {
 
@@ -66,10 +71,13 @@ void start_listener(ListenerConfig & config) {
         }
     }
 
+
+
     auto master = std::make_unique<Master>(std::move(ctx));
+    signal(SIGCHLD, waitpid_signal_handler);
 
     if (master->master_loop()) {
-        //启动子进程
+
         auto ctx = std::move(master->ctx);
         master.reset();
 
@@ -78,13 +86,21 @@ void start_listener(ListenerConfig & config) {
     }
 }
 
-
+void reload_signal_handler(int) {
+    needExit = true;
+}
 
 void fork_listeners(ProxyConfig & config) {
     for (int i = 0; i < config.listener_count; i++) {
         pid_t pid = fork_with_cleanup();
         if (pid == 0) {
+
+            signal(SIGHUP, SIG_DFL);
+            signal(SIGTERM, SIG_DFL);
+            signal(SIGCHLD, SIG_DFL);
             // 子进程运行监听逻辑
+            if (signal(SIGHUP, reload_signal_handler) == SIG_ERR)
+                spdlog::error("failed to reload signal handler");
             start_listener(config.listeners[i]);
             exit(0);
         } else if (pid < 0) {

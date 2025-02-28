@@ -29,33 +29,38 @@ int load_config(const char *filename, ProxyConfig & config) {
         lc.process_count = json_integer_value(json_object_get(item, "process_count"));
 
         const auto backends = json_object_get(item, "backends");
-        const auto count = json_array_size(backends);
+        if (backends) {
+            const auto count = json_array_size(backends);
 
-        auto load_balancing = std::string(json_string_value(json_object_get(item, "load_balancing")));
-
-        if (load_balancing == "weighted_round_robin") {
-            lc.load_balancer.algorithm = LoadBalancingAlgorithm::WeightedRoundRobin;
-        }
-        else if (load_balancing == "round_robin") {
-            lc.load_balancer.algorithm = LoadBalancingAlgorithm::RoundRobin;
-        }
-        else if (load_balancing == "least_connections") {
-            lc.load_balancer.algorithm = LoadBalancingAlgorithm::LeastConnections;
-        }
-
-        for (int j = 0; j < count; j++) {
-            auto& backend = lc.load_balancer.backends.emplace_back();
-            json_t *backend_item = json_array_get(backends, i);
-
-            backend.server_addr.sin_family = AF_INET;
-            backend.server_addr.sin_port = htons(json_integer_value(json_object_get(backend_item, "port")));
-            inet_pton(AF_INET, json_string_value(json_object_get(backend_item, "host")), & backend.server_addr.sin_addr);
-
-            auto weight = json_object_get(backend_item, "weight");
-            if (weight) {
-                backend.weight = json_integer_value(weight);
+            auto load_balancing = std::string(json_string_value(json_object_get(item, "load_balancing")));
+            lc.backend_type = ListenerConfig::LOAD_BALANCER;
+            if (load_balancing == "weighted_round_robin") {
+                lc.load_balancer.algorithm = LoadBalancingAlgorithm::WeightedRoundRobin;
+            }
+            else if (load_balancing == "round_robin") {
+                lc.load_balancer.algorithm = LoadBalancingAlgorithm::RoundRobin;
+            }
+            else if (load_balancing == "least_connections") {
+                lc.load_balancer.algorithm = LoadBalancingAlgorithm::LeastConnections;
             }
 
+            for (int j = 0; j < count; j++) {
+                auto& backend = lc.load_balancer.backends.emplace_back();
+                json_t *backend_item = json_array_get(backends, i);
+
+                backend.server_addr.sin_family = AF_INET;
+                backend.server_addr.sin_port = htons(json_integer_value(json_object_get(backend_item, "port")));
+                inet_pton(AF_INET, json_string_value(json_object_get(backend_item, "host")), & backend.server_addr.sin_addr);
+
+                if (const auto weight = json_object_get(backend_item, "weight")) {
+                    backend.weight = json_integer_value(weight);
+                }
+
+            }
+        }
+        else {
+            lc.backend_type = ListenerConfig::STATIC;
+            lc.static_file.root_path = std::string(json_string_value(json_object_get(item, "root")));
         }
 
     }

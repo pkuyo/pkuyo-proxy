@@ -2,23 +2,23 @@
   "listen_ports": [
     {
       "port": 8080,
-      "server_name": "server 1",
+      "server_name": "server1",
       "process_count": 4,
+      "load_balancing": "least_connections",
       "backends": [
         {
           "host": "127.0.0.1",
           "port": 8000,
           "process_count": 4,
           "weight": 1
-        },
-        {
-          "host": "127.0.0.1",
-          "port": 8001,
-          "weight": 2
         }
       ]
+    },
+    {
+      "port": 8080,
+      "server_name": "server 1",
+      "process_count": 4,
+      "root": "/home/pkuyo/www"
     }
-  ],
-
-  "load_balancing": "least_connections"
+  ]
 }

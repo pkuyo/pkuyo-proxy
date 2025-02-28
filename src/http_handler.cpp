@@ -7,30 +7,35 @@
 
 #include "http_handler.h"
 
+#include <fstream>
 #include <helper.h>
 #include <string>
 #include <unistd.h>
 #include <sys/epoll.h>
 #include <sstream>
 #include <worker.h>
+#include <sys/stat.h>
 
 #include "spdlog/spdlog.h"
-
-static const char* backend_error_response = R"(<html>
-<head><title>502 Bad Gateway</title></head>
-<body>
-<center><h1>502 Bad Gateway</h1></center>
-<hr><center>pkuyo-proxy</center>
-</body>
-</html>)";
 
 std::string get_status_msg(int errorCode) {
     switch (errorCode) {
         case 500: return "Internal Server Error";
         case 502: return "Bad Gateway";
+        case 400: return "Bad Request";
+        case 405: return "Method Not Allowed";
+        case 404: return "Not Found";
         default: return "Unknown Status";
     }
 }
+
+
+std::string backend_error_response(int errorCode) {
+    std::stringstream response("<html><head><title>");
+    response << errorCode <<" " <<get_status_msg(errorCode) <<"</title></head><body><center>pkuyo-proxy</center></body></html>";
+    return response.str();
+}
+
 
 std::string gen_http_header(const char* content, int errorCode) {
     std::stringstream response;
@@ -88,7 +93,7 @@ bool get_request_head(HttpContext & context) {
     if (pos2 == std::string::npos) {
         return true;
     }
-    context.request.url_path = headers.substr(pos+1, pos2);
+    context.request.url_path = headers.substr(pos+1, pos2-pos-1);
     return false;
 }
 
@@ -105,15 +110,17 @@ bool get_response_head(HttpContext & context) {
 
 void FailedBackendHandler::recv_content(HttpContext &&content) {
     HttpContext response;
-    response.header = gen_http_header(backend_error_response, 502);
-    response.content = backend_error_response;
+    response.content = backend_error_response(502);
+    response.header = gen_http_header(   response.content.c_str(), 502);
     response.complete();
+    get_response_head(response);
+
     rev_handler->recv_content(std::move(response));
 }
 
 char NormalConnHandler::buffer[BUFFER_SIZE]{};
 
-NormalConnHandler:: NormalConnHandler(Worker* owner,int _fd, int _epoll_fd, bool _is_request)
+NormalConnHandler::NormalConnHandler(Worker* owner,int _fd, int _epoll_fd, bool _is_request)
     : IConnHandler(owner),fd(_fd),epoll_fd(_epoll_fd),is_request(_is_request) {
     set_nonblocking(_fd);
     add_epoll_fd(_epoll_fd, _fd, EPOLLIN | EPOLLET);
@@ -257,9 +264,11 @@ void NormalConnHandler::parse_http_context() {
                         tmp_context.complete();
                         rev_handler->recv_content(std::move(tmp_context));
                     }
+                    else {
+                        tmp_context.content.reserve(tmp_context.data.content_remaining);
+                    }
                 }
                 raw_buffer.erase(0, header_end + 4); // 移除已解析的头部
-
 
             } else {
                 // 头部不完整，等待更多数据
@@ -328,11 +337,117 @@ void NormalConnHandler::parse_chunked_content() {
 
 
 void NormalConnHandler::recv_content(HttpContext &&content) {
+    if (!is_request && !content.request.is_valid()) {
+        HttpContext response;
+        response.content = backend_error_response(400);
+        response.header = gen_http_header(response.content.c_str(), 400);
+        response.complete();
+        rev_handler->recv_content(std::move(response));
+        return;
+    } else if (is_request && !content.response.is_valid()) {
+        content.content = backend_error_response(500);
+        content.header = gen_http_header(content.content .c_str(), 500);
+    }
     queue.push(std::move(content));
     if (!is_sending)
         handle_write_event();
 }
 
+
+std::string StaticFileHandler::get_mime_type(const std::string &file_path) {
+    size_t dot_pos = file_path.find_last_of('.');
+    if (dot_pos == std::string::npos) return "application/octet-stream";
+
+    std::string ext = file_path.substr(dot_pos + 1);
+    if (ext == "html" || ext == "htm") return "text/html";
+    if (ext == "css") return "text/css";
+    if (ext == "js") return "application/javascript";
+    if (ext == "png") return "image/png";
+    if (ext == "jpg" || ext == "jpeg") return "image/jpeg";
+    if (ext == "gif") return "image/gif";
+    if (ext == "json") return "application/json";
+    return "text/plain";
+}
+
+bool StaticFileHandler::resolve_full_path(const std::string &url_path, std::string &full_path) {
+    std::string decoded_path = url_decode(url_path);
+    std::string combined_path = root_dir + "/" + decoded_path;
+
+    char resolved[PATH_MAX];
+    if (realpath(combined_path.c_str(), resolved) == nullptr) return false;
+
+    full_path = resolved;
+    return full_path.find(root_dir) == 0;
+}
+std::string StaticFileHandler::url_decode(const std::string &str)  {
+    std::string result;
+    for (size_t i = 0; i < str.size(); ++i) {
+        if (str[i] == '%' && i+2 < str.size()) {
+            int hex = std::stoi(str.substr(i+1, 2), nullptr, 16);
+            result += static_cast<char>(hex);
+            i += 2;
+        } else if (str[i] == '+') {
+            result += ' ';
+        } else {
+            result += str[i];
+        }
+    }
+    return result;
+}
+
+void StaticFileHandler::recv_content(HttpContext &&context) {
+    if (context.request.method != "GET") {
+        send_error(405);
+        return;
+    }
+
+    std::string url_path(context.request.url_path);
+    std::string full_path;
+    if (!resolve_full_path(url_path, full_path)) {
+        send_error(404);
+        return;
+    }
+
+    //获取文件状态
+    struct stat st;
+    if (stat(full_path.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) {
+        send_error(404);
+        return;
+    }
+
+
+    std::ifstream file(full_path, std::ios::binary);
+    if (!file.is_open()) {
+        send_error(500);
+        return;
+    }
+
+    std::string content((std::istreambuf_iterator<char>(file)),
+                       std::istreambuf_iterator<char>());
+
+    HttpContext response;
+    response.header = "HTTP/1.1 200 OK\r\n";
+    response.header += "Content-Type: " + get_mime_type(full_path) + "\r\n";
+    response.header += "Content-Length: " + std::to_string(content.size()) + "\r\n";
+    response.header += "Connection: close\r\n\r\n";
+    response.content = std::move(content);
+    response.complete();
+    get_response_head(response);
+
+    rev_handler->recv_content(std::move(response));
+}
+
+void StaticFileHandler::send_error(int code) const {
+
+    HttpContext response;
+
+    response.content = std::move(backend_error_response(code));
+    response.header = std::move(gen_http_header(response.content.c_str(), code));
+    response.complete();
+    get_response_head(response);
+
+    rev_handler->recv_content(std::move(response));
+}
 
 
 

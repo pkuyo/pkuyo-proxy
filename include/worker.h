@@ -43,8 +43,8 @@ private:
 
     void process_events();
 
-    bool process_read_event(epoll_event & ev);
-    bool process_write_event(epoll_event & ev);
+    bool process_read_event(const epoll_event & ev);
+    bool process_write_event(const epoll_event & ev);
 
 
     bool accept_new_conn();

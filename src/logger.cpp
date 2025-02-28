@@ -8,7 +8,7 @@
 int setup_logger()
 {
     try {
-        const char* dir_path = "logs";
+        const char* dir_path = "/home/pkuyo/pkuyo_proxy/logs";
         if (access(dir_path, F_OK)) {
             if (!mkdir(dir_path, 0755)) {
                 fprintf(stderr,"Error creating dir: %s",strerror(errno));
@@ -21,7 +21,7 @@ int setup_logger()
 
 
         logger->set_pattern("[%Y-%m-%d %H:%M:%S.%e] [PID:%P] [%l] %v");
-        logger->set_level(spdlog::level::debug);
+        logger->set_level(spdlog::level::info);
 
         register_logger(logger);
         set_default_logger(logger);

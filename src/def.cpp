@@ -6,6 +6,8 @@
 
 #include "spdlog/spdlog.h"
 
+ListenerConfig::ListenerConfig() = default;
+
 ProcContext::~ProcContext() {
     if (!is_valid)
         return;
@@ -20,6 +22,5 @@ ProcContext::~ProcContext() {
     spdlog::info("ProcContext destroyed");
 }
 pid_t fork_with_cleanup() {
-    spdlog::default_logger()->flush();
     return fork();
 }

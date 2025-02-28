@@ -104,4 +104,24 @@ private:
     void parse_chunked_content();
 };
 
+class StaticFileHandler final : public IConnHandler {
+
+    std::string root_dir;
+
+    std::string get_mime_type(const std::string& file_path);
+
+    bool resolve_full_path(const std::string& url_path, std::string& full_path);
+
+    std::string url_decode(const std::string& str);
+
+public:
+    StaticFileHandler(Worker* owner, const std::string& root)
+        : IConnHandler(owner), root_dir(root) {}
+
+    void recv_content(HttpContext&& context) override;
+
+private:
+    void send_error(int code) const;
+};
+
 #endif //HTTP_HANDER_H

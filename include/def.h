@@ -28,12 +28,24 @@ struct LoadBalancerConfig{
     std::vector<BackendServerConfig> backends;
 };
 
+struct StaticFileConfig {
+    std::string root_path;
+};
 
 struct ListenerConfig{
     int port{};
     char server_name[256]{};
     int process_count{};
-    LoadBalancerConfig load_balancer{};
+
+    enum {
+        LOAD_BALANCER,
+        STATIC
+    } backend_type = STATIC;
+
+    LoadBalancerConfig load_balancer;
+    StaticFileConfig static_file;
+
+    ListenerConfig();
 };
 
 struct ProxyConfig {
@@ -101,9 +113,15 @@ struct HttpContext {
     struct {
         std::string_view url_path;
         std::string_view method;
+        [[nodiscard]] bool is_valid() const {
+            return !url_path.empty() && !method.empty();
+        }
     } request;
     struct {
         std::string_view status_code;
+        [[nodiscard]] bool is_valid() const {
+            return !status_code.empty();
+        }
     } response;
 
     std::string header;
@@ -131,8 +149,8 @@ struct HttpContext {
         state = SEND_HEADER;
         header.clear();
         content.clear();
-        request.url_path = request.method = header;
-        response.status_code = "200";
+        request.url_path = request.method = "";
+        response.status_code = "";
 
     }
 };

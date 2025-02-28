@@ -9,6 +9,7 @@
 #include "spdlog/spdlog.h"
 #include "http_handler.h"
 
+extern bool needExit;
 
 
 Worker::Worker(ProcContext&& _ctx)
@@ -137,23 +138,32 @@ bool Worker::accept_new_conn() {
         log_error("Failed to accept client");
         return true;
     }
-    int backend_fd = new_backend_fd();
 
     client_to_backend[client_fd] = std::make_unique<ProxyHandler>();
     client_to_backend[client_fd]->client = std::make_unique<NormalConnHandler>(this,client_fd,epoll_fd,true);
 
-    if (backend_fd != -1) {
-        client_to_backend[client_fd]->backend = std::make_unique<NormalConnHandler>(this,backend_fd,epoll_fd,false);
-        backend_to_client[backend_fd] = client_to_backend[client_fd].get();
-    }
-    else {
-        client_to_backend[client_fd]->backend = std::make_unique<FailedBackendHandler>(this);
-        backend_to_client[backend_fd] = client_to_backend[client_fd].get();
-    }
+    if (ctx.config.backend_type == ListenerConfig::LOAD_BALANCER) {
+        int backend_fd = new_backend_fd();
+        if (backend_fd != -1) {
+            client_to_backend[client_fd]->backend = std::make_unique<NormalConnHandler>(this,backend_fd,epoll_fd,false);
+            backend_to_client[backend_fd] = client_to_backend[client_fd].get();
+        }
+        else {
+            client_to_backend[client_fd]->backend = std::make_unique<FailedBackendHandler>(this);
+        }
 
-    client_to_backend[client_fd]->init_link();
+        client_to_backend[client_fd]->init_link();
 
-    log_debug("New connection: client %d -> backend %d",client_fd,backend_fd);
+        log_debug("New connection: client %d -> backend %d",client_fd,backend_fd);
+    }
+    else if (ctx.config.backend_type == ListenerConfig::STATIC) {
+        client_to_backend[client_fd]->backend = std::make_unique<StaticFileHandler>(this,
+            ctx.config.static_file.root_path);
+
+        client_to_backend[client_fd]->init_link();
+        log_debug("New connection: client %d -> static",client_fd);
+
+    }
     return false;
 }
 
@@ -176,7 +186,7 @@ void Worker::process_events() {
 }
 
 
-bool Worker::process_read_event(epoll_event & ev) {
+bool Worker::process_read_event(const epoll_event & ev) {
     int fd = ev.data.fd;
 
     if (client_to_backend.contains(fd)) {
@@ -191,16 +201,16 @@ bool Worker::process_read_event(epoll_event & ev) {
     return true;
 }
 
-bool Worker::process_write_event(epoll_event & ev) {
+bool Worker::process_write_event(const epoll_event & ev) {
     int fd = ev.data.fd;
     if (client_to_backend.contains(fd)) {
 
         auto handler = client_to_backend[fd].get();
-        handler->client->handle_write_event();
+        return handler->client->handle_write_event();
 
     } else if (backend_to_client.contains(fd)) {
         auto handler = backend_to_client[fd];
-        handler->backend->handle_write_event();
+        return handler->backend->handle_write_event();
     }
     return true;
 }
@@ -210,9 +220,10 @@ bool Worker::process_write_event(epoll_event & ev) {
 void Worker::worker_loop() {
     if (startup())
         return;
-    while (true) {
+    while (!needExit || !client_to_backend.empty()) {
         process_events();
     }
 
+    log_info("Exiting worker");
 }
 

@@ -11,10 +11,6 @@
 class Master : public Process {
 public:
     explicit Master(ProcContext&& _ctx);
-    ~Master() {
-        instance = nullptr;
-    }
     bool master_loop();
-    Master* instance;
 };
 #endif //MASTER_H
