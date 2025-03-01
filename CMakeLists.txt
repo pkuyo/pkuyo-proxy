@@ -1,14 +1,16 @@
-cmake_minimum_required(VERSION 3.30)
+cmake_minimum_required(VERSION 3.15)
 project(proxy)
 find_package(OpenSSL REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(JANSSON REQUIRED jansson)
 
 set(CMAKE_CXX_STANDARD 20)
 
-set(JANSSON_DIR "${CMAKE_SOURCE_DIR}/external/jansson")
 set(SPDLOG_DIR "${CMAKE_SOURCE_DIR}/external/spdlog")
 
+set(CMAKE_C_FLAGS_RELEASE "-O2")
+set(CMAKE_CXX_FLAGS_RELEASE "-O2")
 
-include_directories(${JANSSON_DIR}/src)
 include_directories(include)
 
 
@@ -27,9 +29,9 @@ add_executable(proxy src/main.cpp
 
 
 set(JANSSON_BUILD_DOCS OFF CACHE BOOL "Disable building Jansson documentation")
-add_subdirectory(${JANSSON_DIR})
 add_subdirectory(${SPDLOG_DIR})
 
-target_link_libraries(proxy PRIVATE ${JANSSON_LIBRARIES})
 target_link_libraries(proxy PRIVATE spdlog::spdlog $<$<BOOL:${MINGW}>:ws2_32>)
 target_link_libraries(proxy PRIVATE OpenSSL::SSL OpenSSL::Crypto)
+target_include_directories(proxy PRIVATE ${JANSSON_INCLUDE_DIRS})
+target_link_libraries(proxy PRIVATE ${JANSSON_LIBRARIES})
