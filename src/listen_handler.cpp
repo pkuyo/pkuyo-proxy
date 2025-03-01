@@ -171,7 +171,7 @@ bool HttpsListenHandler::startup() {
 }
 
 
-std::unique_ptr<IConnHandler> HttpsListenHandler::accept(struct sockaddr *addr) {
+std::unique_ptr<IConnHandler> HttpsListenHandler::accept(sockaddr *addr) {
     socklen_t len = sizeof(sockaddr_in);
     int fd = ::accept(listen_fd, addr, &len);
     if (fd == -1)

@@ -11,6 +11,11 @@
 class Master : public Process {
 public:
     explicit Master(ProcContext&& _ctx);
+
+    bool is_server_healthy(const sockaddr_in &addr);
+
+    void check_health();
+
     bool master_loop();
 };
 #endif //MASTER_H

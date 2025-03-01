@@ -28,6 +28,11 @@ int load_config(const char *filename, ProxyConfig & config) {
         strcpy(lc.server_name, json_string_value(json_object_get(item, "server_name")));
         lc.process_count = json_integer_value(json_object_get(item, "process_count"));
 
+        json_t* health = json_object_get(item, "check_health_time");
+        if (health) {
+            lc.check_health_time = json_integer_value(health);
+        }
+
         auto ssl = json_object_get(item, "ssl");
         if (ssl && (lc.is_ssl = json_is_true(ssl))) {
             strcpy(lc.ssl_key_file, json_string_value(json_object_get(item, "key")));

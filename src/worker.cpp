@@ -29,7 +29,7 @@ BackServer get_next_backend(LoadBalancerConfig & config, ShmLoadBalancer * lb) {
             &lb->stats[lb->current_index]
         };
         lb->current_index = (lb->current_index + 1) % config.backend_count;
-        return backend;
+        return backend.stat->is_healthy ? backend : BackServer{nullptr,nullptr};
 
     } else if (config.algorithm == LoadBalancingAlgorithm::WeightedRoundRobin) {
 
@@ -37,26 +37,38 @@ BackServer get_next_backend(LoadBalancerConfig & config, ShmLoadBalancer * lb) {
         auto state = &lb->stats[0];
         state->current_weight += backend->weight;
         for (int i = 1; i < config.backend_count; i++) {
+            if (!lb->stats[i].is_healthy)
+                continue;
             lb->stats[i].current_weight += config.backends[i].weight;
             if (lb->stats[i].current_weight < state->current_weight) {
                 state = &lb->stats[i];
                 backend = &config.backends[i];
             }
         }
-        state->current_weight -= config.total_weight;
-        return BackServer{backend,state};
+        if (state->is_healthy) {
+            state->current_weight -= config.total_weight;
+            return BackServer{backend,state};
+        }
+        else {
+            state->current_weight -= backend->weight;
+            return BackServer{nullptr,nullptr};
+        }
 
     } else if (config.algorithm == LoadBalancingAlgorithm::LeastConnections) {
         // 最小连接数策略
         auto backend = &config.backends[0];
         auto state = &lb->stats[0];
         for (int i = 1; i < config.backend_count; i++) {
+            if (!lb->stats[i].is_healthy)
+                continue;
+
             if (lb->stats[i].connections < state->connections) {
                 state = &lb->stats[i];
                 backend = &config.backends[i];
             }
         }
-        return BackServer{backend,state};
+        return state->is_healthy ? BackServer{backend,state} :
+        BackServer{nullptr,nullptr};
     }
     return BackServer{nullptr,nullptr};
 }

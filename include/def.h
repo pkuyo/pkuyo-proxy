@@ -41,6 +41,7 @@ struct ListenerConfig{
     int port{};
     char server_name[256]{};
     int process_count{};
+    int check_health_time = -1;
 
     bool is_ssl = false;
 
@@ -93,6 +94,7 @@ struct BackendStat {
     std::atomic<int> connections = 0;
     std::atomic<int> failed_connections = 0;
     std::atomic<int> current_weight = 0;
+    std::atomic<bool> is_healthy = true;
 };
 struct ShmLoadBalancer {
     std::atomic<int> current_index = 0;
