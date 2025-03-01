@@ -46,9 +46,7 @@ public:
 
 };
 
-struct HttpListenHandler final : public IListenHandler {
-
-
+struct HttpListenHandler : public IListenHandler {
 
     explicit HttpListenHandler(Worker* _owner)
         : IListenHandler(_owner) {
@@ -62,6 +60,22 @@ struct HttpListenHandler final : public IListenHandler {
     std::unique_ptr<IConnHandler> accept(struct sockaddr* addr) override;
 
     std::unique_ptr<IConnHandler> connect(struct sockaddr* addr, int len) override;
+};
+
+struct HttpsListenHandler final : public HttpListenHandler {
+    explicit HttpsListenHandler(Worker* _owner)
+        : HttpListenHandler(_owner) {
+    }
+
+    struct ssl_ctx_st* ssl_ctx = nullptr;
+
+    bool initialize_openssl();
+
+    bool startup() override;
+
+    std::unique_ptr<IConnHandler> accept(struct sockaddr* addr) override;
+
+    ~HttpsListenHandler() override;
 };
 
 #endif //PROXY_LISTEN_HANDLER_H

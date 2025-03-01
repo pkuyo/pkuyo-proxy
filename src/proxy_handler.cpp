@@ -51,37 +51,126 @@ std::string gen_http_header(const char* content, int errorCode) {
     return response.str();
 }
 
-//失败返回空
-std::string_view get_header_arg(const std::string_view& headers,const std::string_view& key) {
-    static const std::string zero("0");
-    size_t content_length_pos = headers.find(key);
-    if (content_length_pos == std::string::npos) {
-        return zero;
+
+#include <string>
+#include <vector>
+#include <algorithm>
+#include <cctype>
+#include <stdexcept>
+
+using namespace std;
+
+// 辅助函数：去除字符串两端的空白字符
+void trim(string& s) {
+    size_t start = s.find_first_not_of(" \t");
+    if (start == string::npos) {
+        s.clear();
+        return;
     }
-    content_length_pos+= key.size();
-    while (content_length_pos < headers.size() &&
-       (headers[content_length_pos] == ' ' || headers[content_length_pos] == '\t')) {
-        ++content_length_pos;
-       }
-    size_t end_pos = headers.find("\r\n", content_length_pos);
-    if (end_pos == std::string::npos) {
-        return {};
-    }
-    return headers.substr(content_length_pos, end_pos - content_length_pos);
+    size_t end = s.find_last_not_of(" \t");
+    s = s.substr(start, end - start + 1);
 }
 
-size_t get_content_length(const std::string& headers) {
-    auto value_str = std::string(get_header_arg(headers,"Content-Length:"));
-    try {
-        return std::stoul(value_str);
-    } catch (...) {
-        return -1;
-    }
+// 辅助函数：转换为小写
+string to_lower(string s) {
+    transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return tolower(c); });
+    return s;
 }
 
-bool is_chunked(const std::string& headers) {
-    return get_header_arg(headers,"Transfer-Encoding:") == "chunked";
+// 检查Transfer-Encoding是否包含chunked
+bool contains_chunked(const string& value) {
+    size_t start = 0;
+    while (true) {
+        size_t comma = value.find(',', start);
+        string token = value.substr(start, comma - start);
+        trim(token);
+        if (to_lower(token) == "chunked") {
+            return true;
+        }
+        if (comma == string::npos) break;
+        start = comma + 1;
+    }
+    return false;
 }
+
+vector<string> split_headers(const string& headers) {
+    vector<string> lines;
+    size_t start = 0;
+    while (start < headers.size()) {
+        size_t end = headers.find("\r\n", start);
+        if (end == string::npos) {
+            lines.push_back(headers.substr(start));
+            break;
+        }
+        lines.push_back(headers.substr(start, end - start));
+        start = end + 2;
+    }
+    return lines;
+}
+// 处理HTTP头部
+pair<bool,size_t> process_http_headers(HttpContext & context, const char* addr, bool is_request) {
+    vector<string> lines = split_headers(context.header);
+    bool chunked = false;
+    size_t content_length = 0;
+
+    int xff_idx = -1;
+    string xff_value;
+    int xri_idx = -1;
+    vector<string> field_names;
+
+    // 第一遍遍历：收集关键信息
+    for (size_t i = 1; i < lines.size(); ++i) {
+        string& line = lines[i];
+        size_t colon = line.find(':');
+        if (colon == string::npos) continue;
+
+        string fn = line.substr(0, colon);
+        string fv = line.substr(colon + 1);
+        trim(fn);
+        trim(fv);
+        string lfn = to_lower(fn);
+        field_names.push_back(lfn);
+
+        if (lfn == "transfer-encoding") {
+            if (contains_chunked(fv)) chunked = true;
+        } else if (lfn == "content-length") {
+            try { content_length = stoul(fv); }
+            catch (...) {
+                /* 处理错误 */
+            }
+        } else if (is_request && lfn == "x-forwarded-for") {
+            if (xff_idx == -1) { xff_idx = i; xff_value = fv; }
+        } else if (is_request && lfn == "x-real-ip") {
+            if (xri_idx == -1) xri_idx = i;
+        }
+    }
+
+    if (is_request) {
+        string addr_str(addr);
+        if (xff_idx != -1) {
+            lines[xff_idx] = lines[xff_idx].substr(0, lines[xff_idx].find(':') + 1) + " " + xff_value + ", " + addr_str;
+        } else {
+            lines.push_back("X-Forwarded-For: " + addr_str);
+        }
+
+
+        if (xri_idx != -1) {
+            lines[xri_idx] = "X-Real-IP: " + addr_str;
+        } else {
+            lines.push_back("X-Real-IP: " + addr_str);
+        }
+    }
+
+    context.header.clear();
+    for (const string& line : lines) {
+        context.header += line + "\r\n";
+    }
+    context.header += "\r\n";
+    //spdlog::info(context.header);
+    return {chunked, content_length};
+}
+
+
 
 bool get_request_head(HttpContext & context) {
     std::string_view headers = context.header;
@@ -115,12 +204,12 @@ bool get_response_head(HttpContext & context) {
     // 提取状态码部分
     std::string_view status_code_str = header.substr(first_space + 1, second_space - (first_space + 1));
 
-    // 尝试将状态码字符串转换为整数
+
     try {
         context.response.status_code = std::stoi(std::string(status_code_str));
         return false;
-    } catch (const std::exception&) {
-        return true; // 转换失败
+    } catch (...) {
+        return true;
     }
 }
 
@@ -142,6 +231,12 @@ NormalConnHandler::NormalConnHandler(Worker* owner,std::unique_ptr<IConnHandler>
 }
 
 bool NormalConnHandler::handle_read_event() {
+    if (!conn_handler->handshake_done)
+        if (conn_handler->handshake())
+            return true;
+    if (!conn_handler->handshake_done)
+        return false;
+
     if (read_raw_buff()) {
         return true;
     }
@@ -150,6 +245,12 @@ bool NormalConnHandler::handle_read_event() {
 }
 
 bool NormalConnHandler::handle_write_event() {
+    if (!conn_handler->handshake_done)
+        if (conn_handler->handshake())
+            return true;
+    if (!conn_handler->handshake_done)
+        return false;
+    
     bool result, need_listen = false;
     while (true) {
         if (queue.empty() || !queue.front().is_completed) {
@@ -161,9 +262,9 @@ bool NormalConnHandler::handle_write_event() {
         auto & buffer = current_context.header;
         if (current_context.state == HttpContext::SEND_CONTENT)
             buffer = current_context.content;
-        ssize_t byte_send = conn_handler->write(buffer.data(),buffer.size());
+        auto[error, byte_send] = conn_handler->write(buffer.data(),buffer.size());
         if (byte_send == -1) {
-            if  (errno == EAGAIN || errno == EWOULDBLOCK) {
+            if  (!error) {
                 result = false;
                 need_listen = true;
                 break;
@@ -210,11 +311,13 @@ void NormalConnHandler::log_access() {
             owner->log_error("get_request_head failed");
             return;
         }
-        owner->log_info("reqeust: %.*s %.*s",
+        owner->log_info("reqeust: %.*s %.*s, From %s:%d",
             static_cast<int>(tmp_context.request.method.size()),
             tmp_context.request.method.data(),
             static_cast<int>(tmp_context.request.url_path.size()),
-            tmp_context.request.url_path.data());
+            tmp_context.request.url_path.data(),
+            conn_handler->ip,
+            conn_handler->port);
     }
     else {
         if (get_response_head(tmp_context)) {
@@ -226,9 +329,9 @@ void NormalConnHandler::log_access() {
 
 bool NormalConnHandler::read_raw_buff() {
     while (true) {
-        ssize_t bytes_read = conn_handler->read(buffer,BUFFER_SIZE);
+        auto [error, bytes_read] = conn_handler->read(buffer,BUFFER_SIZE);
         if (bytes_read == -1) {
-            if  (errno == EAGAIN || errno == EWOULDBLOCK)
+            if  (!error)
                 return false;
 
             owner->log_error("read_raw_buff failed, error:%s",strerror(errno));
@@ -251,13 +354,17 @@ void NormalConnHandler::parse_http_context() {
             if (header_end != std::string::npos) {
                 // 解析到完整的头部
                 tmp_context.reset();
-                tmp_context.header = raw_buffer.substr(0, header_end + 4);
-                if (is_chunked(raw_buffer)) {
+                tmp_context.header = std::move(raw_buffer.substr(0, header_end + 2));
+
+                auto [is_chunk, content_length ] =
+                    process_http_headers(tmp_context,conn_handler->ip,is_request);
+
+                if (is_chunk) {
                     state = ConnState::READ_CHUNK_SIZE;
                     log_access();
                 }
                 else {
-                    tmp_context.data.content_remaining = get_content_length(tmp_context.header);
+                    tmp_context.data.content_remaining = content_length;
                     if (tmp_context.data.content_remaining == -1) {
                         raw_buffer.erase(0, header_end + 4);
                         owner->log_error("get_content_length failed");

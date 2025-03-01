@@ -19,6 +19,25 @@
       "server_name": "server 1",
       "process_count": 4,
       "root": "/home/pkuyo/www"
+    },
+    {
+      "port": 443,
+      "server_name": "ssl1",
+      "process_count": 4,
+      "load_balancing": "least_connections",
+
+      "ssl": true,
+      "cert": "/home/pkuyo/pkuyo_proxy/server.crt",
+      "key": "/home/pkuyo/pkuyo_proxy/private.key",
+
+      "backends": [
+        {
+          "host": "127.0.0.1",
+          "port": 8000,
+          "process_count": 4,
+          "weight": 1
+        }
+      ]
     }
   ]
 }

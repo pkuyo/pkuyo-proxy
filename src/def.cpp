@@ -19,7 +19,7 @@ ProcContext::~ProcContext() {
             spdlog::error("close(shm_fd) failed");
         }
     }
-    spdlog::info("ProcContext destroyed");
+    spdlog::debug("ProcContext destroyed");
 }
 pid_t fork_with_cleanup() {
     return fork();

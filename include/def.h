@@ -12,6 +12,8 @@
 
 #define MAX_EVENTS 30
 
+constexpr int BUFFER_SIZE = 4096;
+
 enum class LoadBalancingAlgorithm {
     RoundRobin,         // 轮询
     WeightedRoundRobin, // 加权轮询
@@ -20,13 +22,15 @@ enum class LoadBalancingAlgorithm {
 
 struct BackendServerConfig {
     sockaddr_in server_addr;
-    int weight;
+    int weight = 0;
 };
 
 struct LoadBalancerConfig{
-    int backend_count;
+    int backend_count = 0;
+    int total_weight = 0;
     LoadBalancingAlgorithm algorithm;
     std::vector<BackendServerConfig> backends;
+
 };
 
 struct StaticFileConfig {
@@ -37,6 +41,11 @@ struct ListenerConfig{
     int port{};
     char server_name[256]{};
     int process_count{};
+
+    bool is_ssl = false;
+
+    char ssl_cert_file[256]{};
+    char ssl_key_file[256]{};
 
     enum {
         LOAD_BALANCER,
@@ -83,6 +92,7 @@ struct ProcContext {
 struct BackendStat {
     std::atomic<int> connections = 0;
     std::atomic<int> failed_connections = 0;
+    std::atomic<int> current_weight = 0;
 };
 struct ShmLoadBalancer {
     std::atomic<int> current_index = 0;
@@ -91,21 +101,19 @@ struct ShmLoadBalancer {
 
 struct epoll_event;
 
-const int BUFFER_SIZE = 4096;
 
 struct HttpContext {
 
-    enum SendState {
+    enum  {
         SEND_HEADER,
         SEND_CONTENT,
-    };
+    } state = SEND_HEADER;
 
     union {
         size_t content_remaining;
         size_t chunk_size;
     } data{};
 
-    SendState state = SEND_HEADER;
 
     bool is_completed;
 

@@ -23,14 +23,29 @@ struct BackServer {
 
 BackServer get_next_backend(LoadBalancerConfig & config, ShmLoadBalancer * lb) {
     if (config.algorithm == LoadBalancingAlgorithm::RoundRobin) {
+
         auto backend = BackServer{
             &config.backends[lb->current_index],
             &lb->stats[lb->current_index]
         };
         lb->current_index = (lb->current_index + 1) % config.backend_count;
         return backend;
+
     } else if (config.algorithm == LoadBalancingAlgorithm::WeightedRoundRobin) {
-        //TODO:实现
+
+        auto backend = &config.backends[0];
+        auto state = &lb->stats[0];
+        state->current_weight += backend->weight;
+        for (int i = 1; i < config.backend_count; i++) {
+            lb->stats[i].current_weight += config.backends[i].weight;
+            if (lb->stats[i].current_weight < state->current_weight) {
+                state = &lb->stats[i];
+                backend = &config.backends[i];
+            }
+        }
+        state->current_weight -= config.total_weight;
+        return BackServer{backend,state};
+
     } else if (config.algorithm == LoadBalancingAlgorithm::LeastConnections) {
         // 最小连接数策略
         auto backend = &config.backends[0];
@@ -60,7 +75,12 @@ void Worker::disconnect(int fd) {
 
 bool Worker::startup() {
 
-    listen_handler = std::make_unique<HttpListenHandler>(this);
+    if (ctx.config.is_ssl) {
+        listen_handler = std::make_unique<HttpsListenHandler>(this);
+    }
+    else {
+        listen_handler = std::make_unique<HttpListenHandler>(this);
+    }
     return listen_handler->startup();
 
 }
@@ -181,8 +201,11 @@ bool Worker::process_write_event(const epoll_event & ev) {
 
 
 void Worker::worker_loop() {
-    if (startup())
+    if (startup()) {
+        spdlog::error("Worker start up failed");
+
         return;
+    }
     while (!needExit || !client_to_backend.empty()) {
         process_events();
     }

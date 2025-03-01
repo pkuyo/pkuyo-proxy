@@ -28,6 +28,12 @@ int load_config(const char *filename, ProxyConfig & config) {
         strcpy(lc.server_name, json_string_value(json_object_get(item, "server_name")));
         lc.process_count = json_integer_value(json_object_get(item, "process_count"));
 
+        auto ssl = json_object_get(item, "ssl");
+        if (ssl && (lc.is_ssl = json_is_true(ssl))) {
+            strcpy(lc.ssl_key_file, json_string_value(json_object_get(item, "key")));
+            strcpy(lc.ssl_cert_file, json_string_value(json_object_get(item, "cert")));
+        }
+
         const auto backends = json_object_get(item, "backends");
         if (backends) {
             const auto count = json_array_size(backends);
@@ -44,6 +50,7 @@ int load_config(const char *filename, ProxyConfig & config) {
                 lc.load_balancer.algorithm = LoadBalancingAlgorithm::LeastConnections;
             }
 
+
             for (int j = 0; j < count; j++) {
                 auto& backend = lc.load_balancer.backends.emplace_back();
                 json_t *backend_item = json_array_get(backends, i);
@@ -55,6 +62,12 @@ int load_config(const char *filename, ProxyConfig & config) {
                 if (const auto weight = json_object_get(backend_item, "weight")) {
                     backend.weight = json_integer_value(weight);
                 }
+                if (lc.load_balancer.algorithm == LoadBalancingAlgorithm::WeightedRoundRobin) {
+                    if (backend.weight == 0)
+                        backend.weight = 1;
+                    lc.load_balancer.total_weight += backend.weight;
+                }
+
 
             }
         }
